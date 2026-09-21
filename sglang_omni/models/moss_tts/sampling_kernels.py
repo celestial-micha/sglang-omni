@@ -15,19 +15,19 @@ _UINT32_MAX_F64 = tl.constexpr(float(torch.iinfo(torch.uint32).max))
 _UINT32_MASK = (1 << 32) - 1
 
 
-def _rotl32_host(value: np.ndarray, bits: int) -> np.ndarray:
+def rotl32_host(value: np.ndarray, bits: int) -> np.ndarray:
     return (value << np.uint32(bits)) | (value >> np.uint32(32 - bits))
 
 
-def _murmur3_mix_host(h: np.ndarray, key: np.ndarray) -> np.ndarray:
+def murmur3_mix_host(h: np.ndarray, key: np.ndarray) -> np.ndarray:
     key = key * np.uint32(0xCC9E2D51)
-    key = _rotl32_host(key, 15)
+    key = rotl32_host(key, 15)
     key = key * np.uint32(0x1B873593)
-    h = _rotl32_host(h ^ key, 13)
+    h = rotl32_host(h ^ key, 13)
     return h * np.uint32(5) + np.uint32(0xE6546B64)
 
 
-def _fmix32_host(h: np.ndarray) -> np.ndarray:
+def fmix32_host(h: np.ndarray) -> np.ndarray:
     h = h ^ (h >> np.uint32(16))
     h = h * np.uint32(0x85EBCA6B)
     h = h ^ (h >> np.uint32(13))
@@ -43,11 +43,7 @@ def multinomial_with_seed_host(
 ) -> torch.Tensor:
     """Run SGLang's seeded Gumbel-max semantics on the host."""
     output_device = logprobs.device
-    scores = (
-        logprobs.detach()
-        .to(device="cpu", dtype=torch.float32)
-        .numpy()
-    )
+    scores = logprobs.detach().to(device="cpu", dtype=torch.float32).numpy()
     seeds_host = (
         seeds.detach()
         .to(device="cpu", dtype=torch.int64)
@@ -80,14 +76,14 @@ def multinomial_with_seed_host(
     columns = columns.reshape(1, -1)
 
     hashes = np.zeros((rows, 1), dtype=np.uint32)
-    hashes = _murmur3_mix_host(hashes, seeds_host.astype(np.uint32))
-    hashes = _murmur3_mix_host(
+    hashes = murmur3_mix_host(hashes, seeds_host.astype(np.uint32))
+    hashes = murmur3_mix_host(
         hashes,
         (seeds_host >> np.uint64(32)).astype(np.uint32),
     )
-    hashes = _murmur3_mix_host(hashes, positions_host)
-    hashes = _murmur3_mix_host(hashes, columns)
-    hashes = _fmix32_host(hashes ^ np.uint32(16))
+    hashes = murmur3_mix_host(hashes, positions_host)
+    hashes = murmur3_mix_host(hashes, columns)
+    hashes = fmix32_host(hashes ^ np.uint32(16))
 
     noise = hashes.astype(np.float64) / np.float64(_UINT32_MASK)
     with np.errstate(divide="ignore", invalid="ignore"):

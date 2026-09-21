@@ -2338,9 +2338,7 @@ def test_moss_npu_seeded_sampling_avoids_triton(
         "seeds": torch.tensor([100, 101], dtype=torch.long, device=device),
         "positions": torch.tensor([3, 7], dtype=torch.long, device=device),
     }
-    logits = torch.tensor(
-        [[3.0, 2.0, 1.0, 0.0], [0.0, 1.0, 2.0, 3.0]], device=device
-    )
+    logits = torch.tensor([[3.0, 2.0, 1.0, 0.0], [0.0, 1.0, 2.0, 3.0]], device=device)
 
     full = MossTTSModelRunner.sample_tokens(logits, **common)
     compact = MossTTSModelRunner.sample_tokens(

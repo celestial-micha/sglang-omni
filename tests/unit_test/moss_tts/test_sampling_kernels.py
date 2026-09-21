@@ -105,9 +105,7 @@ def test_host_seeded_sampler_matches_independent_scalar_reference(
     generator = torch.Generator().manual_seed(20260915)
     rows = 9
     token_ids = (
-        torch.tensor([31, 7, 1024, 1, 0, 511, 12, 99, 3, 2048, 13])
-        if compact
-        else None
+        torch.tensor([31, 7, 1024, 1, 0, 511, 12, 99, 3, 2048, 13]) if compact else None
     )
     vocab_size = len(token_ids) if token_ids is not None else 257
     scores = torch.randn(rows, vocab_size, generator=generator) * 3
