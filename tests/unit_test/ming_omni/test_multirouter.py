@@ -152,7 +152,7 @@ def test_real_request_prefix_chunks_keep_routes_aligned_with_injected_rows(cache
     )
     images = torch.arange(8).reshape(4, 2).float()
     request.omni_model_inputs = {"image_embeds": images, "pad_values": {"image": 1003}}
-    request._omni_consumed = None
+    request._omni_consumed = None  # noqa: leading-underscore
     request.inflight_middle_chunks = 1
     calls = []
 
