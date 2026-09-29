@@ -163,7 +163,10 @@ def test_comm_router_routes_npu_payload_when_is_cuda_reports_true(
             return True
 
     monkeypatch.setattr(platforms.current_platform, "device_type", "npu")
-    npu_tensor = torch.Tensor._make_subclass(NPUTensorSeenAsCuda, torch.empty(1), False)
+    # PyTorch exposes tensor subclass construction through this private API.
+    npu_tensor = torch.Tensor._make_subclass(  # noqa: leading-underscore
+        NPUTensorSeenAsCuda, torch.empty(1), False
+    )
     router = CommRouter(
         stage_name="thinker",
         gpu_id=0,
