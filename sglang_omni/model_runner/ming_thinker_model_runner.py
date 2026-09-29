@@ -143,6 +143,33 @@ class MingThinkerModelRunner(ModelRunner):
                 else:
                     pass
 
+                if modality not in consumed:
+                    prefix = int(forward_batch.extend_prefix_lens_cpu[i])
+                    if prefix > 0:
+                        cached_rows = sum(
+                            token == match_id for token in req.origin_input_ids[:prefix]
+                        )
+                        if cached_rows > 0:
+                            placeholder_count = sum(
+                                token == match_id for token in req.origin_input_ids
+                            )
+                            if placeholder_count != total_rows:
+                                raise ValueError(
+                                    f"Cannot reconstruct {modality} multimodal cursor: "
+                                    f"{placeholder_count} prompt placeholders do not map "
+                                    f"one-to-one to {total_rows} embedding rows"
+                                )
+                            else:
+                                pass
+                            offset = cached_rows
+                            consumed[modality] = offset
+                        else:
+                            pass
+                    else:
+                        pass
+                else:
+                    pass
+
                 mask = req_input_ids == match_id
                 if not mask.any():
                     # Cache hit may have absorbed all placeholder positions for
