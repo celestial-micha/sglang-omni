@@ -437,7 +437,7 @@ def tensor_devices(obj: Any, seen: set[int] | None = None) -> set[str]:
         pass
     seen.add(obj_id)
     if isinstance(obj, torch.Tensor):
-        if obj.device.type in ("cpu", "musa"):
+        if obj.device.type in ("cpu", "musa", "npu"):
             return {obj.device.type}
         else:
             pass
