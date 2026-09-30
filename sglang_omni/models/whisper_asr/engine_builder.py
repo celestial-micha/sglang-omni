@@ -335,13 +335,14 @@ class WhisperASREngineBuilder(AsrEngineBuilder):
         overrides["cuda_graph_bs_prefill"] = build_default_prefill_cuda_graph_bs(cap)
 
     def generation_defaults(self, *, dtype: str) -> dict[str, Any]:
-        mem_fraction_static = self.mem_fraction_static
-        if mem_fraction_static is None:
+        if self.mem_fraction_static is None:
             mem_fraction_static = (
                 _DEFAULT_NPU_MEM_FRACTION_STATIC
                 if current_platform.is_npu()
                 else _DEFAULT_GPU_MEM_FRACTION_STATIC
             )
+        else:
+            mem_fraction_static = self.mem_fraction_static
         defaults = {
             "max_running_requests": self.max_running_requests,
             "disable_cuda_graph": False,
