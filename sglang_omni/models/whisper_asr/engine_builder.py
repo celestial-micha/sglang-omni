@@ -354,13 +354,6 @@ class WhisperASREngineBuilder(AsrEngineBuilder):
             "dtype": dtype,
             "cuda_graph_backend_prefill": CudaGraphBackend.BREAKABLE,
         }
-        # Whisper cross-attention indexes each request's encoder span with
-        # data-dependent slice bounds. The Ascend graph compiler cannot
-        # specialize that expression, while the eager NPU path is supported.
-        # Keep CUDA defaults unchanged and let an explicit server override opt
-        # back into NPU graph capture when the backend gains support.
-        if current_platform.is_npu():
-            defaults["cuda_graph_backend_decode"] = CudaGraphBackend.DISABLED
         return defaults
 
     def make_adapters(self, model: Any) -> tuple[Any, Any]:

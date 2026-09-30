@@ -185,7 +185,7 @@ def test_whisper_disables_chunked_prefill_for_atomic_encoder_prefix() -> None:
         builder.adjust_overrides({"chunked_prefill_size": 4096})
 
 
-def test_whisper_npu_defaults_decode_graph_to_eager(monkeypatch) -> None:
+def test_whisper_npu_preserves_decode_graph_default(monkeypatch) -> None:
     monkeypatch.setattr(
         whisper_asr_builder,
         "current_platform",
@@ -198,17 +198,18 @@ def test_whisper_npu_defaults_decode_graph_to_eager(monkeypatch) -> None:
     )
 
     defaults = builder.generation_defaults(dtype="float16")
-    assert defaults["cuda_graph_backend_decode"] == CudaGraphBackend.DISABLED
+    assert "cuda_graph_backend_decode" not in defaults
+    assert defaults["disable_cuda_graph"] is False
     assert defaults["mem_fraction_static"] == 0.50
 
     merged = build_generation_batch_overrides(
         **defaults,
         server_args_overrides={
-            "cuda_graph_backend_decode": "full",
+            "cuda_graph_backend_decode": "disabled",
             "mem_fraction_static": 0.40,
         },
     )
-    assert merged["cuda_graph_backend_decode"] == "full"
+    assert merged["cuda_graph_backend_decode"] == "disabled"
     assert merged["mem_fraction_static"] == 0.40
 
 
