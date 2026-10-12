@@ -4,7 +4,7 @@ Whisper ASR checkpoints can be started through the OpenAI-compatible `/v1/audio/
 
 ## Prerequisites
 
-Install `sglang-omni` by following [Installation](../get_started/installation.md), then download a Whisper checkpoint:
+For CUDA, install `sglang-omni` by following [Installation](../get_started/installation.md). For Ascend, use the installation profile below. Download a Whisper checkpoint:
 
 ```bash
 hf download openai/whisper-large-v3
@@ -12,33 +12,25 @@ hf download openai/whisper-large-v3
 
 ## Ascend NPU
 
-Single-card inference was tested on Ascend910_9362 with PyTorch/torch_npu 2.10,
-CANN 9.0, and SGLang 0.5.19. Reuse a compatible Ascend environment; the generic
-CUDA installation instructions do not prepare that environment.
+The tested single-card profile uses `openai/whisper-large-v3` in FP16 on a 64 GB Ascend910_9362 with PyTorch/torch_npu 2.10, CANN 9.0 and SGLang 0.5.19. Decode graphs remain enabled.
 
-Whisper handles encoder-decoder attention during NPU decode graph capture
-in the model package, using existing KV cache interfaces and tensor masks.
-Self-attention reads only the decoder cache span, bounded by the checkpoint's
-max_target_positions; cross-attention reads only the encoder span, bounded by
-max_source_positions. Invalid request-table columns are masked before lookup.
-The shared SGLang and Omni runtime do not require a patch.
-
-From this checkout, run the model tests and start the service in the compatible
-Ascend environment:
+Start from an Ascend environment with the NPU runtime and Omni's audio dependencies installed; see [Ascend prerequisites](../get_started/installation_npu.md#prerequisites). The repository's NPU installer targets a different SGLang release line, so it does not install this tested profile. In the prepared environment, install the released package and this checkout explicitly, preserving the existing Ascend dependencies:
 
 ```bash
-python -c 'import sglang, sglang_omni; print(sglang.__file__); print(sglang_omni.__file__)'
-python -m pytest -q -rs tests/unit_test/whisper_asr
-python -m sglang_omni.cli serve \
-  --model-path openai/whisper-large-v3 --port 8000
+python -m pip install 'setuptools>=77'
+python -m pip install --no-deps 'sglang==0.5.19'
+python -m pip install --no-deps --no-build-isolation -e .
 ```
 
-Use an unmodified SGLang 0.5.19 runtime and this model checkout. Preserve the
-Ascend environment's CANN configuration. Decode graphs remain enabled.
-When the user does not set the memory fraction, Whisper uses
-mem_fraction_static=0.50 on NPU and retains 0.85 on other platforms. Explicit
-settings retain precedence; the tested 64 GB device does not establish the
-best memory budget for every device or workload.
+These commands require an existing compatible CANN, PyTorch, torch_npu, triton-ascend and sgl-kernel-npu stack. No SGLang source patch is required. Select a device and start the service:
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0
+export SGLANG_OMNI_PLATFORM_SPEC=sglang_omni.platforms.npu.NPUOmniPlatform
+sgl-omni serve --model-path openai/whisper-large-v3 --port 8000
+```
+
+Whisper defaults to `mem_fraction_static=0.50` on NPU and `0.85` on other platforms. Set `stages.asr.engine.mem_fraction_static` in the pipeline YAML to override the memory budget for your device or workload.
 
 ## Server Configuration
 

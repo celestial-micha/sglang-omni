@@ -185,47 +185,37 @@ def test_whisper_disables_chunked_prefill_for_atomic_encoder_prefix() -> None:
         builder.adjust_overrides({"chunked_prefill_size": 4096})
 
 
-def test_whisper_npu_preserves_decode_graph_default(monkeypatch) -> None:
+@pytest.mark.parametrize("is_npu, default_memory", [(True, 0.50), (False, 0.85)])
+@pytest.mark.parametrize("explicit_memory", [None, 0.40])
+def test_whisper_device_memory_defaults_and_explicit_override(
+    monkeypatch: pytest.MonkeyPatch,
+    is_npu: bool,
+    default_memory: float,
+    explicit_memory: float | None,
+) -> None:
     monkeypatch.setattr(
         whisper_asr_builder,
         "current_platform",
-        SimpleNamespace(is_npu=lambda: True),
+        SimpleNamespace(is_npu=lambda: is_npu),
     )
     builder = whisper_asr_builder.WhisperASREngineBuilder(
         max_running_requests=4,
         max_new_tokens=32,
-        mem_fraction_static=None,
+        mem_fraction_static=explicit_memory,
     )
 
     defaults = builder.generation_defaults(dtype="float16")
     assert "cuda_graph_backend_decode" not in defaults
     assert defaults["disable_cuda_graph"] is False
-    assert defaults["mem_fraction_static"] == 0.50
+    assert defaults["mem_fraction_static"] == (
+        default_memory if explicit_memory is None else explicit_memory
+    )
 
     merged = build_generation_batch_overrides(
         **defaults,
-        server_args_overrides={
-            "cuda_graph_backend_decode": "disabled",
-            "mem_fraction_static": 0.40,
-        },
+        server_args_overrides={"mem_fraction_static": 0.30},
     )
-    assert merged["cuda_graph_backend_decode"] == "disabled"
-    assert merged["mem_fraction_static"] == 0.40
-
-
-def test_whisper_cuda_keeps_existing_memory_default(monkeypatch) -> None:
-    monkeypatch.setattr(
-        whisper_asr_builder,
-        "current_platform",
-        SimpleNamespace(is_npu=lambda: False),
-    )
-    builder = whisper_asr_builder.WhisperASREngineBuilder(
-        max_running_requests=4,
-        max_new_tokens=32,
-        mem_fraction_static=None,
-    )
-
-    assert builder.generation_defaults(dtype="float16")["mem_fraction_static"] == 0.85
+    assert merged["mem_fraction_static"] == 0.30
 
 
 def test_whisper_breakable_prefill_graph_policy() -> None:
