@@ -17,8 +17,7 @@ Architecturally, MOSS-TTS-v1.5 is the `delay-pattern` counterpart to [MOSS-TTS-L
 
 ## Prerequisites
 
-Install `sglang-omni` by following [Installation](../get_started/installation.md), then
-download the model (public, no token required):
+For CUDA, install `sglang-omni` by following [Installation](../get_started/installation.md). For Ascend, use the installation profile below. Download the model (public, no token required):
 
 ```bash
 hf download OpenMOSS-Team/MOSS-TTS-v1.5
@@ -29,14 +28,19 @@ The processor ships with the checkpoint, so no extra TTS package is needed. Deco
 
 ### Ascend NPU
 
-The Ascend profile uses BF16 MOSS-TTS-v1.5 on one 64 GB Ascend910_9362 with
-PyTorch 2.10, torch_npu 2.10, CANN 9.0, and the released SGLang 0.5.21 package.
-Preserve the Ascend PyTorch environment when installing SGLang dependencies.
-MOSS supplies its NPU seeded sampler and staged Q/K norm/RoPE locally; its
-backbone decode graph and sampling/state-machine graphs execute on the NPU.
+The tested single-card profile uses BF16 MOSS-TTS-v1.5 on a 64 GB Ascend910_9362, PyTorch/torch_npu 2.10, CANN 9.0 and released SGLang 0.5.21. Backbone decode and sampling graphs are enabled.
 
-For concurrent reference encoding and graph input updates, set the following
-before starting the server:
+Start from an Ascend environment with the NPU runtime and Omni's audio dependencies installed; see [Ascend prerequisites](../get_started/installation_npu.md#prerequisites). The repository's NPU installer and images currently target SGLang 0.5.20, so that installer does not install this tested profile. In the prepared environment, install the released package and this checkout explicitly, preserving the existing Ascend dependencies:
+
+```bash
+python -m pip install 'setuptools>=77'
+python -m pip install --no-deps 'sglang==0.5.21'
+python -m pip install --no-deps --no-build-isolation -e .
+```
+
+These commands install the Python packages; they require an existing compatible CANN, PyTorch, torch_npu, triton-ascend and sgl-kernel-npu stack. No SGLang source patch is required.
+
+Set the following before starting the server:
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0
@@ -45,12 +49,7 @@ export PER_STREAM_QUEUE=1
 export TASK_QUEUE_ENABLE=1
 ```
 
-`PER_STREAM_QUEUE=1` uses a separate host submission queue for each NPU stream.
-An update stream then drains its own queue rather than another stream's
-queued work. This is an existing torch_npu configuration,
-and no runtime source patch is required. The vendor documents it as an
-experimental option for multi-stream Dequeue blocking; measure its overhead
-on your deployment. See [stream-level TaskQueue delivery](https://www.hiascend.com/document/detail/en/Pytorch/2610/devguide/fwfeatures/docs/en/framework_feature_guide_pytorch/stream_taskqueue_parallel_delivery.md).
+Keep both queue settings for this profile. `PER_STREAM_QUEUE` is an [experimental torch_npu option](https://www.hiascend.com/document/detail/en/Pytorch/2610/devguide/fwfeatures/docs/en/framework_feature_guide_pytorch/stream_taskqueue_parallel_delivery.md) used by the validated concurrent reference-encoding and graph workload; check the profile on your deployment.
 
 Download `OpenMOSS-Team/MOSS-Audio-Tokenizer` as well as the TTS checkpoint.
 For local weights, create `npu-moss.yaml`:
@@ -67,9 +66,11 @@ stages:
       codec_model_path: /models/MOSS-Audio-Tokenizer
 ```
 
-Start with `sgl-omni serve --model-path /models/MOSS-TTS-v1.5 --config npu-moss.yaml
---port 8000`. Reference encoding and waveform decoding use the repository's
-NPU codec path; the CUDA-specific packed decoder remains a GPU capability.
+Start the server, then use the speech requests below:
+
+```bash
+sgl-omni serve --model-path /models/MOSS-TTS-v1.5 --config npu-moss.yaml --port 8000
+```
 
 ## Server Configuration
 
@@ -329,18 +330,17 @@ references, not CI thresholds.
 | EN | 1.68% | 1.32% (4 outliers) | 3.449 / 4.141 | 0.811 | 2.312 |
 | ZH | 1.36% | 1.27% (2 outliers) | 3.608 / 4.153 | 0.635 | 2.213 |
 
-The tested Ascend profile above completed EN 1088/1088 with seed 1234, concurrency
-8, eight warmup requests, reference audio/text, and automatic duration tokens.
-The same HF Whisper-large-v3 FP32 scoring protocol gives 212/11943 = 1.7751%
-corpus WER, with four samples above 50% retained in that total. Auxiliary WER is
-184/11913 = 1.5445%; mean/p95 latency is 5.583/7.045 s, RTF mean is 1.2827, and
-throughput is 1.431 requests/s. Generation and scoring each have zero failures.
-Hardware, software, and recorded seed conditions differ from the historical
-H200 reference, so these measurements do not establish matched equivalence.
-
-A handful of utterances run away into a repetition loop (> 50% WER) and dominate the raw
+A handful of utterances in the H200 reference run away into a repetition loop (> 50% WER) and dominate the raw
 micro-average; excluding them, corpus WER is ~1.3% in both languages, and per-sample median WER
 is 0.00%.
+
+The Ascend profile above completed all 1088 EN samples with seed 1234, concurrency 8, eight warmup requests, reference audio/text and automatic duration tokens. HF Whisper-large-v3 FP32 scored every output; generation and scoring each had zero failures.
+
+| Device | Lang | WER (corpus) | WER (excl. >50%) | Latency mean / p95 (s) | RTF mean | Throughput (qps) |
+|---|---|---|---|---|---|---|
+| Ascend910_9362 | EN | 212/11943 = 1.7751% | 184/11913 = 1.5445% (4 outliers) | 5.583 / 7.045 | 1.2827 | 1.431 |
+
+All four severe samples remain in the primary WER; their cause is unresolved. Hardware, software and recorded seed conditions differ from the historical H200 reference, so this is not a matched hardware comparison.
 
 ## Known Limitations
 

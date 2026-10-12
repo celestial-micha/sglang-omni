@@ -11,11 +11,9 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 
 from sglang_omni.models.moss_tts.sampler import DelayGraphBatch, DelaySamplingOutput
-from sglang_omni.platforms import current_platform
 
 if TYPE_CHECKING:
     from sglang_omni.models.moss_tts.sglang_model import MossTTSDelaySGLangModel
-    from sglang_omni.platforms.device_graph import ReplayableGraph
 else:
     pass
 
@@ -34,7 +32,7 @@ class StaticSamplingInputs(NamedTuple):
 
 
 class CapturedSamplingGraph(NamedTuple):
-    graph: ReplayableGraph
+    graph: torch.cuda.CUDAGraph | torch.npu.NPUGraph
     rows: torch.Tensor
     next_delay_state: torch.Tensor
 
@@ -69,12 +67,7 @@ class MossTTSDelaySamplingCudaGraphRunner:
         else:
             pass
         self.model = model
-        self.device_module = torch.get_device_module(model.device)
-        self.graph_backend = (
-            None
-            if model.device.type == "npu"
-            else current_platform.get_device_graph_backend(model.device)
-        )
+        self.device_module = torch.npu if model.device.type == "npu" else torch.cuda
         self.capture_bs = tuple(int(batch_size) for batch_size in capture_bs)
         self.disable_padding = bool(disable_padding)
         self.graphs: dict[int, CapturedSamplingGraph] = {}
@@ -288,18 +281,16 @@ class MossTTSDelaySamplingCudaGraphRunner:
                 capture_error_mode="thread_local",
             )
         else:
-            capture_context = self.graph_backend.capture(
+            graph = torch.cuda.CUDAGraph()
+            capture_context = torch.cuda.graph(
+                graph,
                 pool=self.graph_pool,
                 stream=capture_stream,
-                thread_local_errors=True,
+                capture_error_mode="thread_local",
             )
         with self.device_module.stream(capture_stream):
-            with capture_context as captured_graph:
+            with capture_context:
                 output = self.run_static(bucket)
-        if device.type != "npu":
-            graph = captured_graph
-        else:
-            pass
         self.device_module.current_stream(device).wait_stream(capture_stream)
         return CapturedSamplingGraph(
             graph=graph,
