@@ -56,7 +56,7 @@ class VisionProjector(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out, _ = self.proj[0](x)
         for layer in self.proj[1:]:
-            if isinstance(layer, RowParallelLinear):
+            if isinstance(layer, (ColumnParallelLinear, RowParallelLinear)):
                 out, _ = layer(out)
             else:
                 out = layer(out)

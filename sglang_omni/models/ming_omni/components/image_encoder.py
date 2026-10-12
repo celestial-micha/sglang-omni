@@ -16,6 +16,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from sglang_omni.models.ming_omni.components.common import load_ming_config
+from sglang_omni.models.ming_omni.components.npu_tensor_parallel import (
+    configure_npu_tensor_parallel,
+)
 from sglang_omni.models.ming_omni.components.projectors import VisionProjector
 from sglang_omni.models.ming_omni.components.vision_encoder import MingOmniVisionEncoder
 from sglang_omni.models.weight_loader import resolve_model_path
@@ -78,6 +81,11 @@ class MingImageEncoder(nn.Module):
         self.linear_proj = VisionProjector(
             vision_dim=vision_dim, llm_dim=llm_dim, mlp_depth=mlp_depth
         )
+        if torch.device(device).type == "npu" and tp_size > 1:
+            configure_npu_tensor_parallel(self.visual)
+            configure_npu_tensor_parallel(self.linear_proj)
+        else:
+            pass
         loaded_vis = self.visual.load_weights(
             iter_weights_by_prefix(model_dir, "vision.")
         )
