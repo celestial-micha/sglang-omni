@@ -191,6 +191,87 @@ def is_pretokenized_prompt(inputs: Any) -> bool:
     )
 
 
+def extract_inline_image_messages(
+    inputs: object,
+) -> tuple[object, list[dict[str, object]] | None]:
+    """Keep inline image placeholders at their original message positions.
+
+    The top-level images extension remains unchanged without inline images.
+    When both forms are supplied, accept only the exact same ordered image
+    list as a duplicate declaration; reject ambiguity instead of guessing.
+    """
+    messages = inputs.get("messages", []) if isinstance(inputs, dict) else inputs
+    if not isinstance(messages, list):
+        return inputs, None
+    else:
+        pass
+    found = any(
+        isinstance(m, dict)
+        and isinstance(m.get("content"), list)
+        and any(
+            isinstance(p, dict) and p.get("type") == "image_url" for p in m["content"]
+        )
+        for m in messages
+    )
+    if not found:
+        return inputs, None
+    else:
+        pass
+    images = []
+    structured = []
+    for message in messages:
+        content = message.get("content", "")
+        if isinstance(content, str):
+            structured.append({**message, "role": message.get("role", "user")})
+            continue
+        else:
+            pass
+        if not isinstance(content, list):
+            raise ValueError("Inline image messages require text or content parts")
+        else:
+            pass
+        parts = []
+        for part in content:
+            if not isinstance(part, dict):
+                raise ValueError("Invalid multimodal content part")
+            else:
+                pass
+            if part.get("type") == "image_url":
+                image_url = part.get("image_url")
+                url = image_url.get("url") if isinstance(image_url, dict) else None
+                if not isinstance(url, str) or not url.strip():
+                    raise ValueError("image_url requires a nonempty url string")
+                else:
+                    pass
+                images.append(url)
+                parts.append({"type": "image"})
+            elif part.get("type") == "text":
+                if not isinstance(part.get("text"), str):
+                    raise ValueError("Text content requires a text string")
+                else:
+                    pass
+                parts.append(dict(part))
+            else:
+                raise ValueError("Unsupported content part mixed with inline images")
+        structured.append(
+            {**message, "role": message.get("role", "user"), "content": parts}
+        )
+    result = dict(inputs) if isinstance(inputs, dict) else {"messages": messages}
+    top_images = result.get("images")
+    if top_images:
+        top_images = top_images if isinstance(top_images, list) else [top_images]
+        if top_images != images:
+            raise ValueError(
+                "Inline and top-level images must match exactly when both are supplied"
+            )
+        else:
+            pass
+    else:
+        pass
+    result["images"] = images
+    return result, structured
+
+
 class Qwen3OmniPreprocessor:
     """CPU-side preprocessing and tokenization using the HF processor."""
 
@@ -479,6 +560,7 @@ class Qwen3OmniPreprocessor:
 
     async def call_impl(self, payload: StagePayload) -> StagePayload:
         inputs = payload.request.inputs
+        inputs, inline_messages = extract_inline_image_messages(inputs)
         if is_pretokenized_prompt(inputs):
             return self.preprocess_train_inputs(payload, inputs)
         else:
@@ -654,17 +736,38 @@ class Qwen3OmniPreprocessor:
         # so audio cache keys include every decoded sample, including video tracks.
         audio_cache_key = compute_audio_cache_key(audios)
 
-        messages_norm = normalize_messages(messages)
-        # Insert placeholders:
-        # - Explicit audio files get independent audio placeholders
-        # - Video audio (when use_audio_in_video=True) is handled by video token, no separate placeholder
         num_audios_for_placeholder = num_explicit_audios
-        messages_mm = self.build_multimodal_messages(
-            messages_norm,
-            num_images=len(images),
-            num_audios=num_audios_for_placeholder,
-            num_videos=len(videos),
-        )
+        if inline_messages is None:
+            messages_norm = normalize_messages(messages)
+            messages_mm = self.build_multimodal_messages(
+                messages_norm,
+                num_images=len(images),
+                num_audios=num_audios_for_placeholder,
+                num_videos=len(videos),
+            )
+        else:
+            # Preserve inline positions without serializing image data as text.
+            messages_mm = inline_messages
+            if num_audios_for_placeholder or videos:
+                last = messages_mm[-1]
+                if last.get("role") == "user":
+                    content = last.get("content", "")
+                    parts = (
+                        [{"type": "text", "text": content}]
+                        if isinstance(content, str)
+                        else list(content)
+                    )
+                    extra = [{"type": "video"}] * len(videos) + [
+                        {"type": "audio"}
+                    ] * num_audios_for_placeholder
+                    messages_mm = [
+                        *messages_mm[:-1],
+                        {**last, "content": extra + parts},
+                    ]
+                else:
+                    pass
+            else:
+                pass
         prompt_text = self.processor.apply_chat_template(
             messages_mm,
             add_generation_prompt=True,
