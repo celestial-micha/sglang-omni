@@ -873,7 +873,7 @@ def test_qwen_thinker_cuda_graph_capture_lifecycle(
     output_proc = object()
 
     class FakeModelRunner:
-        model = object()
+        model = SimpleNamespace(model=SimpleNamespace(layers_to_capture=[]))
 
         def init_cuda_graphs(self) -> None:
             raise AssertionError("Qwen bootstrap must use the shared graph helper")
@@ -881,7 +881,10 @@ def test_qwen_thinker_cuda_graph_capture_lifecycle(
     model_config = SimpleNamespace(
         model_path="model",
         vocab_size=10,
-        hf_config=SimpleNamespace(thinker_config=object()),
+        hf_config=SimpleNamespace(
+            thinker_config=object(),
+            talker_config=SimpleNamespace(accept_hidden_layer=24),
+        ),
     )
     model_worker = SimpleNamespace(
         model_runner=FakeModelRunner(),
@@ -932,7 +935,7 @@ def test_qwen_thinker_cuda_graph_capture_lifecycle(
     monkeypatch.setattr(
         request_builders,
         "make_thinker_stream_output_builder",
-        lambda *, speech_enabled: object(),
+        lambda *, speech_enabled, thinker_hidden_layer: object(),
     )
     monkeypatch.setattr(
         sglang_backend, "SGLangOutputProcessor", lambda **kwargs: output_proc
@@ -1002,12 +1005,15 @@ def test_qwen_thinker_enables_and_attests_breakable_prefill_graphs(
     graph_init_workers: list[object] = []
     output_proc_kwargs: list[dict[str, object]] = []
     qwen_runner_calls: list[tuple[object, object]] = []
-    model = object()
+    model = SimpleNamespace(model=SimpleNamespace(layers_to_capture=[]))
     output_proc = object()
     model_config = SimpleNamespace(
         model_path="model",
         vocab_size=10,
-        hf_config=SimpleNamespace(thinker_config=object()),
+        hf_config=SimpleNamespace(
+            thinker_config=object(),
+            talker_config=SimpleNamespace(accept_hidden_layer=24),
+        ),
     )
     model_worker = SimpleNamespace(
         model_runner=SimpleNamespace(model=model),
@@ -1053,7 +1059,7 @@ def test_qwen_thinker_enables_and_attests_breakable_prefill_graphs(
     monkeypatch.setattr(
         request_builders,
         "make_thinker_stream_output_builder",
-        lambda *, speech_enabled: object(),
+        lambda *, speech_enabled, thinker_hidden_layer: object(),
     )
     monkeypatch.setattr(
         sglang_backend,
@@ -1075,7 +1081,8 @@ def test_qwen_thinker_enables_and_attests_breakable_prefill_graphs(
     assert "defer_cuda_graph_capture" not in captured
     assert graph_init_workers == []
     assert attest_calls == [(model_worker.model_runner, False)]
-    assert output_proc_kwargs == [{}]
+    assert output_proc_kwargs[0]["capture_hidden"] is True
+    assert model.model.layers_to_capture == [24]
     assert qwen_runner_calls == [(model_worker, output_proc)]
     assert scheduler.server_args is server_args
 

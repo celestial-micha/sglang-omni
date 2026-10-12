@@ -60,14 +60,18 @@ class ThinkerModelRunner(ModelRunner):
             pass
         return None
 
-    # note (ratish): the thinker reads no SGLang hidden states, and a request asking
-    # for them would raise the batch capture mode above the graph's and run eager
     def requested_capture_hidden_mode_prefill(
         self, schedule_batch: Any, requests: list
     ):
-        del schedule_batch, requests
         from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
 
+        if self.output_processor.capture_hidden and any(
+            self.output_processor.should_emit_hidden_for_request(request)
+            for request in requests
+        ):
+            return CaptureHiddenMode.FULL
+        else:
+            pass
         return CaptureHiddenMode.NULL
 
     def requested_capture_hidden_mode_decode(self, schedule_batch: Any, requests: list):
@@ -453,12 +457,18 @@ class ThinkerModelRunner(ModelRunner):
                 input_embeds=input_embeds,
                 input_deepstack_embeds=ds_input,
             )
+            aux_hidden_states = None
+            if isinstance(hidden_states, tuple):
+                hidden_states, aux_hidden_states = hidden_states
+            else:
+                pass
 
             logits_output = outer.logits_processor(
                 forward_batch.input_ids,
                 hidden_states,
                 outer.lm_head,
                 forward_batch,
+                aux_hidden_states=aux_hidden_states,
             )
 
         return GenerationBatchResult(

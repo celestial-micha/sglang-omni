@@ -231,6 +231,20 @@ class TalkerPrefillBuilder:
         prompt_ids, prompt_embed, prompt_hidden, prompt_model_inputs = (
             self.reconstruct_prompt_states(state)
         )
+        prompt_multimodal_mask = self.build_multimodal_mask(prompt_ids)
+        if prompt_multimodal_mask.any():
+            first_chunk = thinker_chunks[0]
+            assert (
+                first_chunk.metadata["thinker_hidden_layer"]
+                == self.model.config.accept_hidden_layer
+            )
+            layer_hidden = first_chunk.data
+            assert layer_hidden.ndim == 2 and layer_hidden.shape == prompt_hidden.shape
+            prompt_hidden[prompt_multimodal_mask] = layer_hidden.to(
+                device=self.device, dtype=self.dtype
+            )[prompt_multimodal_mask]
+        else:
+            pass
 
         assistant_token_ids = self.extract_chunk_token_ids(thinker_chunks)
         assistant_embed = self.load_prompt_token_embeddings(assistant_token_ids)

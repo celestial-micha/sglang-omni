@@ -28,6 +28,7 @@ def create_thinker_scheduler(
     from sglang_omni.models.qwen3_omni.request_builders import (
         make_thinker_scheduler_adapters,
         make_thinker_stream_output_builder,
+        should_generate_audio_output,
     )
     from sglang_omni.models.qwen3_omni.thinker_model_runner import (
         Qwen3OmniThinkerModelRunner,
@@ -70,7 +71,19 @@ def create_thinker_scheduler(
     else:
         pass
 
-    output_proc = SGLangOutputProcessor()
+    output_proc = SGLangOutputProcessor(
+        capture_hidden=speech_enabled,
+        should_emit_hidden=lambda request: (
+            not request.data.req.output_ids
+            and should_generate_audio_output(request.data.stage_payload)
+        ),
+    )
+    thinker_hidden_layer = None
+    if speech_enabled:
+        thinker_hidden_layer = model_config.hf_config.talker_config.accept_hidden_layer
+        model_worker.model_runner.model.model.layers_to_capture = [thinker_hidden_layer]
+    else:
+        pass
 
     if speech_enabled and prefill_graph_backend != CudaGraphBackend.BREAKABLE:
         model_runner = ThinkerModelRunner(model_worker, output_proc)
@@ -86,9 +99,11 @@ def create_thinker_scheduler(
         tokenizer=tokenizer,
         vocab_size=model_config.vocab_size,
         thinker_config=thinker_config,
+        speech_enabled=speech_enabled,
     )
     stream_output_builder = make_thinker_stream_output_builder(
-        speech_enabled=speech_enabled
+        speech_enabled=speech_enabled,
+        thinker_hidden_layer=thinker_hidden_layer,
     )
 
     return OmniScheduler(

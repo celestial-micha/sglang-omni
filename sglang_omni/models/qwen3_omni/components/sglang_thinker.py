@@ -108,11 +108,17 @@ class Qwen3OmniThinkerForCausalLM(nn.Module):
             pp_proxy_tensors=pp_proxy_tensors,
             input_deepstack_embeds=input_deepstack_embeds,
         )
+        aux_hidden_states = None
+        if isinstance(hidden_states, tuple):
+            hidden_states, aux_hidden_states = hidden_states
+        else:
+            pass
         return self.logits_processor(
             input_ids,
             hidden_states,
             self.lm_head,
             forward_batch,
+            aux_hidden_states=aux_hidden_states,
         )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> None:

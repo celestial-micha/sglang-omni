@@ -7,6 +7,7 @@ import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 import torch
 import xxhash
@@ -1025,10 +1026,39 @@ def apply_thinker_result(
     return thinker_out
 
 
-def make_thinker_stream_output_builder(*, speech_enabled: bool):
+def make_thinker_stream_output_builder(
+    *, speech_enabled: bool, thinker_hidden_layer: int | None = None
+):
     def _build_stream_output(
         request_id: str, req_data: Any, req_output: Any
     ) -> list[OutgoingMessage]:
+        captured_hidden = (req_output.extra or {}).get("hidden_states")
+        if captured_hidden is not None:
+            captured_hidden = captured_hidden.reshape(-1, captured_hidden.shape[-1])
+            start = req_data.req.extend_range.start
+            end = start + captured_hidden.shape[0]
+            assert end == req_data.req.extend_range.end
+            assert end <= len(req_data.req.origin_input_ids)
+            if start == 0:
+                req_data.extra_model_outputs["talker_prompt_hidden_states"] = (
+                    captured_hidden.new_empty(
+                        (len(req_data.req.origin_input_ids), captured_hidden.shape[1])
+                    )
+                )
+                req_data.extra_model_outputs["talker_prompt_hidden_rows"] = 0
+            else:
+                pass
+            assert start <= req_data.extra_model_outputs["talker_prompt_hidden_rows"]
+            assert (
+                captured_hidden.shape[1]
+                == req_data.extra_model_outputs["talker_prompt_hidden_states"].shape[1]
+            )
+            req_data.extra_model_outputs["talker_prompt_hidden_states"][
+                start:end
+            ].copy_(captured_hidden.detach())
+            req_data.extra_model_outputs["talker_prompt_hidden_rows"] = end
+        else:
+            pass
         # note (ratish): a middle chunk of a chunked prefill samples a token the
         # request discards; streaming it would put a prompt row into the answer
         if req_data.req.inflight_middle_chunks > 0 or req_output.data is None:
@@ -1057,16 +1087,34 @@ def make_thinker_stream_output_builder(*, speech_enabled: bool):
         # note (ratish): a cross-process stream chunk must be a tensor, and one
         # this small is pickled inline with the control message
         token_tensor = torch.tensor([token_id], dtype=torch.long)
-        return [
-            OutgoingMessage(
-                request_id=request_id,
-                type="stream",
-                data=token_tensor,
-                target=target,
-                metadata={"token_id": token_id},
+        messages = []
+        for target in stream_targets:
+            chunk_tensor = token_tensor
+            metadata = {"token_id": token_id}
+            if target == "talker_ar" and not req_data.req.output_ids:
+                assert req_data.extra_model_outputs.get(
+                    "talker_prompt_hidden_rows"
+                ) == len(
+                    req_data.req.origin_input_ids
+                ), "speech prefill requires complete thinker prompt hidden states"
+                assert thinker_hidden_layer is not None
+                chunk_tensor = req_data.extra_model_outputs.pop(
+                    "talker_prompt_hidden_states"
+                )
+                req_data.extra_model_outputs.pop("talker_prompt_hidden_rows")
+                metadata["thinker_hidden_layer"] = thinker_hidden_layer
+            else:
+                pass
+            messages.append(
+                OutgoingMessage(
+                    request_id=request_id,
+                    type="stream",
+                    data=chunk_tensor,
+                    target=target,
+                    metadata=metadata,
+                )
             )
-            for target in stream_targets
-        ]
+        return messages
 
     return _build_stream_output
 
@@ -1077,6 +1125,7 @@ def make_thinker_scheduler_adapters(
     vocab_size: int,
     thinker_config: Any = None,
     stage_name: str = "thinker",
+    speech_enabled: bool = False,
 ):
     """Build model-specific StagePayload <-> scheduler adapters for thinker."""
 
@@ -1092,6 +1141,11 @@ def make_thinker_scheduler_adapters(
             thinker_config=thinker_config,
         )
         req_data.stage_payload = payload
+        if speech_enabled and should_generate_audio_output(payload):
+            # note (codex): KV-only prefixes do not retain the prompt layer needed for speech.
+            req_data.req.extra_key = f"talker-prompt:{uuid4()}"
+        else:
+            pass
         return req_data
 
     def result_adapter(data: SGLangARRequestData) -> StagePayload:

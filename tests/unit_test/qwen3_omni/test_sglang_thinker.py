@@ -123,7 +123,7 @@ def test_outer_thinker_forward_accepts_sidecar_request_identity():
     wrapper = object.__new__(Qwen3OmniThinkerForCausalLM)
     torch.nn.Module.__init__(wrapper)
     wrapper.model = fake_model
-    wrapper.logits_processor = lambda *args: args[0]
+    wrapper.logits_processor = lambda *args, aux_hidden_states=None: args[0]
     wrapper.lm_head = object()
     wrapper.fused_rope_gate = None
     input_ids = torch.tensor([1, 2], dtype=torch.long)

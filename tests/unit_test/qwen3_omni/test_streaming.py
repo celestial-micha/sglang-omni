@@ -168,20 +168,37 @@ def test_qwen_thinker_stream_builder_sends_the_token_id_to_each_target(
     stream: bool,
     expected_targets: list[str],
 ):
-    builder = make_thinker_stream_output_builder(speech_enabled=speech_enabled)
+    builder = make_thinker_stream_output_builder(
+        speech_enabled=speech_enabled, thinker_hidden_layer=24
+    )
     req_data = SimpleNamespace(
-        req=SimpleNamespace(inflight_middle_chunks=0),
+        req=SimpleNamespace(
+            inflight_middle_chunks=0,
+            output_ids=[],
+            origin_input_ids=[1, 2],
+            extend_range=SimpleNamespace(start=0, end=2),
+        ),
+        extra_model_outputs={},
         stage_payload=thinker_stage_payload(output_modalities, stream=stream),
     )
 
-    messages = builder("req-1", req_data, SimpleNamespace(data=11))
+    prompt_hidden = torch.tensor([[3.0, 4.0], [5.0, 6.0]])
+    messages = builder(
+        "req-1",
+        req_data,
+        SimpleNamespace(data=11, extra={"hidden_states": prompt_hidden}),
+    )
 
     assert [msg.target for msg in messages] == expected_targets
     for message in messages:
         assert message.type == "stream"
         assert message.data.device.type == "cpu"
-        assert message.data.tolist() == [11]
-        assert message.metadata == {"token_id": 11}
+        if message.target == "talker_ar":
+            assert torch.equal(message.data, prompt_hidden)
+            assert message.metadata == {"token_id": 11, "thinker_hidden_layer": 24}
+        else:
+            assert message.data.tolist() == [11]
+            assert message.metadata == {"token_id": 11}
 
 
 @pytest.mark.parametrize(
@@ -199,15 +216,20 @@ def test_qwen_thinker_stream_builder_emits_nothing_without_an_answer_token(
         stage_payload=thinker_stage_payload(["text", "audio"]),
     )
 
-    assert builder("req-1", req_data, SimpleNamespace(data=token_id)) == []
+    assert builder("req-1", req_data, SimpleNamespace(data=token_id, extra=None)) == []
 
 
 class TokenMetadataOnlyChunk:
     def __init__(self, message: OutgoingMessage):
         self.metadata = message.metadata
+        self.prompt_hidden = (
+            message.data if "thinker_hidden_layer" in self.metadata else None
+        )
 
     @property
     def data(self):
+        if self.prompt_hidden is not None:
+            return self.prompt_hidden
         raise AssertionError("the talker must rebuild assistant rows from token ids")
 
 
@@ -221,19 +243,34 @@ def text_projected(*token_ids: int) -> torch.Tensor:
 
 
 def test_qwen_talker_conditions_on_streamed_token_ids():
-    builder = make_thinker_stream_output_builder(speech_enabled=True)
+    builder = make_thinker_stream_output_builder(
+        speech_enabled=True, thinker_hidden_layer=24
+    )
     req_data = SimpleNamespace(
-        req=SimpleNamespace(inflight_middle_chunks=0),
+        req=SimpleNamespace(
+            inflight_middle_chunks=0,
+            output_ids=[],
+            origin_input_ids=list(range(7)),
+            extend_range=SimpleNamespace(start=0, end=7),
+        ),
+        extra_model_outputs={},
         stage_payload=thinker_stage_payload(["audio"], stream=False),
     )
 
     def talker_chunk(token_id: int) -> TokenMetadataOnlyChunk:
-        (message,) = builder("req-1", req_data, SimpleNamespace(data=token_id))
+        extra = (
+            {"hidden_states": prompt_hidden} if not req_data.req.output_ids else None
+        )
+        (message,) = builder(
+            "req-1", req_data, SimpleNamespace(data=token_id, extra=extra)
+        )
+        req_data.req.output_ids.append(token_id)
         assert message.target == "talker_ar"
         return TokenMetadataOnlyChunk(message)
 
     prefill_builder = object.__new__(TalkerPrefillBuilder)
     prefill_builder.model = SimpleNamespace(
+        config=SimpleNamespace(accept_hidden_layer=24),
         text_projection=lambda tensor: tensor * 2.0,
         hidden_projection=lambda tensor: tensor + 100.0,
         get_input_embeddings=lambda: (

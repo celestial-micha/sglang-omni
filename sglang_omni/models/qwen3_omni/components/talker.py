@@ -52,6 +52,55 @@ from sglang_omni.vendor.sglang.utils import make_layers
 logger = logging.getLogger(__name__)
 
 
+class Qwen3OmniTalkerNpuRMSNorm(RMSNorm):
+    """Talker-local HF cast order on NPU; other models keep SGLang RMSNorm."""
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
+        super().__init__(hidden_size, eps=eps, cast_x_before_out_mul=True)
+        self.register_buffer("_unit_weight", None, persistent=False)
+
+    def prepare_npu(self) -> None:
+        # Called once after checkpoint weights have reached their final device.
+        self._unit_weight = torch.ones_like(
+            self.weight.data
+        )  # noqa: leading-underscore - Preserve the internal buffer name.
+
+    def forward_npu(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+        post_residual_addition: torch.Tensor | None = None,
+        quant_linear: nn.Module | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # note (codex): Residual fusion already preserves the cast boundary.
+        if (
+            x.numel() == 0
+            or x.dtype not in (torch.bfloat16, torch.float16)
+            or self.weight.dtype != x.dtype
+            or residual is not None
+        ):
+            return super().forward_npu(
+                x, residual, post_residual_addition, quant_linear
+            )
+        else:
+            pass
+
+        import torch_npu
+
+        if (
+            self._unit_weight is None
+        ):  # noqa: leading-underscore - Internal normalization buffer.
+            raise RuntimeError("Talker NPU RMSNorm unit weight was not prepared")
+        else:
+            pass
+        normalized = torch_npu.npu_rms_norm(
+            x,
+            self._unit_weight,
+            self.variance_epsilon,  # noqa: leading-underscore - Internal normalization buffer.
+        )[0]
+        return normalized * self.weight.data
+
+
 def bind_default_weight_loaders(module: nn.Module) -> None:
     for param in module.parameters():
         if not hasattr(param, "weight_loader"):
@@ -394,6 +443,7 @@ class Qwen3OmniMoeTalkerTextModel(nn.Module):
 
         # Decoder layers
         alt_stream = torch.cuda.Stream() if current_platform.is_cuda() else None
+        norm_cls = Qwen3OmniTalkerNpuRMSNorm if current_platform.is_npu() else RMSNorm
         self.layers = make_layers(
             config.num_hidden_layers,
             lambda idx, prefix: Qwen3OmniMoeTalkerDecoderLayer(
@@ -402,13 +452,14 @@ class Qwen3OmniMoeTalkerTextModel(nn.Module):
                 quant_config=quant_config,
                 prefix=prefix,
                 alt_stream=alt_stream,
+                norm_cls=norm_cls,
             ),
             prefix=add_prefix("layers", prefix),
         )
         self.start_layer = 0
         self.end_layer = config.num_hidden_layers
 
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = norm_cls(config.hidden_size, eps=config.rms_norm_eps)
         self.layers_to_capture = []
         max_batch_size = get_schedule().max_running_requests
         self.cp_enabled = True
@@ -424,9 +475,7 @@ class Qwen3OmniMoeTalkerTextModel(nn.Module):
             device=self.codec_embedding.weight.device,
         )
 
-        # Disable fused_qk_norm_rope so the separate QK-norm + RoPE path is
-        # used.  The fp32 weight promotion + cast_x_before_out_mul is applied
-        # in load_weights() (after weights are loaded from checkpoint).
+        # Keep Q/K norm visible to the Talker-specific NPU cast-order path.
         for idx in range(self.start_layer, self.end_layer):
             self.layers[idx].self_attn.use_fused_qk_norm_rope = False
             self.layers[idx].self_attn.compatible_with_fused_qk_norm_rope = False
@@ -533,6 +582,7 @@ class Qwen3OmniMoeTalkerCodePredictor(nn.Module):
 
         # 5 dense decoder layers
         alt_stream = torch.cuda.Stream() if current_platform.is_cuda() else None
+        norm_cls = Qwen3OmniTalkerNpuRMSNorm if current_platform.is_npu() else RMSNorm
         self.model.layers = nn.ModuleList()
         for idx in range(cp_config.num_hidden_layers):
             # Create a decoder layer similar to Thinker but with dense MLP
@@ -553,22 +603,28 @@ class Qwen3OmniMoeTalkerCodePredictor(nn.Module):
                 prefix=add_prefix(f"model.layers.{idx}.self_attn", prefix),
                 dual_chunk_attention_config=None,
                 alt_stream=alt_stream,
+                norm_cls=norm_cls,
             )
+            if current_platform.is_npu():
+                layer.self_attn.use_fused_qk_norm_rope = False
+                layer.self_attn.compatible_with_fused_qk_norm_rope = False
+            else:
+                pass
             layer.mlp = Qwen3OmniMoeTalkerDenseMLP(
                 cp_config.hidden_size,
                 cp_config.intermediate_size,
                 quant_config=quant_config,
                 prefix=add_prefix(f"model.layers.{idx}.mlp", prefix),
             )
-            layer.input_layernorm = RMSNorm(
+            layer.input_layernorm = norm_cls(
                 cp_config.hidden_size, eps=cp_config.rms_norm_eps
             )
-            layer.post_attention_layernorm = RMSNorm(
+            layer.post_attention_layernorm = norm_cls(
                 cp_config.hidden_size, eps=cp_config.rms_norm_eps
             )
             self.model.layers.append(layer)
 
-        self.model.norm = RMSNorm(cp_config.hidden_size, eps=cp_config.rms_norm_eps)
+        self.model.norm = norm_cls(cp_config.hidden_size, eps=cp_config.rms_norm_eps)
 
         # 15 LM heads for predicting layers 1-15
         self.lm_head = nn.ModuleList(
@@ -1934,3 +1990,12 @@ class Qwen3OmniTalker(nn.Module):
                 param.weight_loader(param, loaded_weight)
             else:
                 pass
+
+        if current_platform.is_npu():
+            for module in self.modules():
+                if isinstance(module, Qwen3OmniTalkerNpuRMSNorm):
+                    module.prepare_npu()
+                else:
+                    pass
+        else:
+            pass
