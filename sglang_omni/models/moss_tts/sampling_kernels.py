@@ -10,6 +10,10 @@ from sglang.kernels.ops.sampling.murmur_hash import fmix32, murmur3_mix, murmur_
 from sglang.srt.layers.sampler import multinomial_with_seed
 from triton.language.extra import libdevice
 
+from sglang_omni.models.moss_tts.sampling_npu import (
+    moss_hash_shift_constants,
+    multinomial_with_seed_npu,
+)
 from sglang_omni.platforms import current_platform
 
 _UINT32_MAX_F64 = tl.constexpr(float(torch.iinfo(torch.uint32).max))
@@ -92,31 +96,47 @@ def seeded_gumbel_argmax(
 
     if scores.ndim != 2:
         raise ValueError(f"seeded Gumbel scores must be rank 2, got {scores.shape}")
+    else:
+        pass
     rows, vocab_size = scores.shape
     if seeds.shape != (rows,) or positions.shape != (rows,):
         raise ValueError("seeded Gumbel metadata shape mismatch")
+    else:
+        pass
     if scores.device.type != "cuda" or not (
         seeds.device == scores.device
         and positions.device == scores.device
         and output.device == scores.device
     ):
         raise ValueError("seeded_gumbel_argmax requires one CUDA device")
+    else:
+        pass
     if scores.dtype != torch.float32:
         raise TypeError(f"seeded Gumbel scores must be float32, got {scores.dtype}")
+    else:
+        pass
     if seeds.dtype != torch.int64 or positions.dtype != torch.int64:
         raise TypeError("seeded Gumbel seeds and positions must be int64")
+    else:
+        pass
     if output.dtype != torch.int64 or output.ndim != 1 or output.numel() < rows:
         raise ValueError(
             "seeded Gumbel output must be a sufficiently large int64 vector"
         )
+    else:
+        pass
     if output.stride(0) != 1:
         raise ValueError("seeded Gumbel output must have stride 1")
+    else:
+        pass
 
     block_size = triton.next_power_of_2(vocab_size)
     if block_size > 2048:
         raise ValueError(
             f"seeded Gumbel one-pass vocabulary exceeds 2048: {vocab_size}"
         )
+    else:
+        pass
     result = output[:rows]
     seeded_gumbel_argmax_kernel[(rows,)](
         scores,
@@ -134,7 +154,6 @@ def seeded_gumbel_argmax(
     return result
 
 
-@torch.compile(dynamic=True, disable=current_platform.is_npu())
 def multinomial_with_seed_and_token_ids(
     logprobs: torch.Tensor,
     seed: torch.Tensor,
@@ -144,9 +163,48 @@ def multinomial_with_seed_and_token_ids(
     """Seeded Gumbel-max using original vocabulary ids as RNG columns."""
 
     if logprobs.device.type == "npu":
-        return multinomial_with_seed(
-            logprobs, seed, positions, token_ids=token_ids
-        ).view(-1)
+        moss_hash_shift_constants(logprobs.device)
+        rows = logprobs.shape[0]
+        if rows == 0:
+            return torch.empty(0, dtype=torch.long, device=logprobs.device)
+        else:
+            pass
+        bucket = 1 << (rows - 1).bit_length()
+        if rows != bucket:
+            logprobs = torch.nn.functional.pad(
+                logprobs, (0, 0, 0, bucket - rows), value=-torch.inf
+            )
+            seed = torch.nn.functional.pad(seed, (0, bucket - rows))
+            positions = torch.nn.functional.pad(positions, (0, bucket - rows))
+        else:
+            pass
+        torch.compiler.npugraph_mark_step_begin()
+        return compiled_multinomial_with_seed_and_token_ids(
+            logprobs.contiguous(),
+            seed.contiguous(),
+            positions.contiguous(),
+            token_ids.contiguous(),
+        )[:rows]
+    else:
+        pass
+    return compiled_multinomial_with_seed_and_token_ids(
+        logprobs, seed, positions, token_ids
+    )
+
+
+@torch.compile(
+    dynamic=not current_platform.is_npu(),
+    backend="npugraphs" if current_platform.is_npu() else "inductor",
+    fullgraph=current_platform.is_npu(),
+)
+def compiled_multinomial_with_seed_and_token_ids(
+    logprobs: torch.Tensor,
+    seed: torch.Tensor,
+    positions: torch.Tensor,
+    token_ids: torch.Tensor,
+) -> torch.Tensor:
+    if logprobs.device.type == "npu":
+        return multinomial_with_seed_npu(logprobs, seed, positions, token_ids)
     else:
         seed = seed.to(torch.uint64)
         hashed = murmur_hash32(seed, positions, token_ids)
@@ -305,14 +363,20 @@ def sample_seeded_fused(
         raise ValueError(
             f"fused seeded sampler supports vocab <= {MAX_FUSED_SAMPLE_VOCAB}, got {vocab}"
         )
+    else:
+        pass
     if rows == 0:
         return torch.empty(0, device=logits.device, dtype=torch.int64)
+    else:
+        pass
     if (
         top_k.dtype.is_floating_point
         or top_k.dtype.is_complex
         or top_k.dtype == torch.bool
     ):
         raise TypeError(f"top_k must be an integer tensor, got {top_k.dtype}")
+    else:
+        pass
     top_k = top_k.to(torch.int64)
     logits = logits.float().contiguous()
     out = torch.empty(rows, device=logits.device, dtype=torch.int64)

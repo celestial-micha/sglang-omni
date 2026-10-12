@@ -27,48 +27,49 @@ hf download OpenMOSS-Team/MOSS-TTS-v1.5
 The processor ships with the checkpoint, so no extra TTS package is needed. Decoding base64
 (data-URI) reference audio additionally requires `soundfile` (`uv pip install soundfile`).
 
-## Ascend NPU
+### Ascend NPU
 
-Single-card inference was tested on Ascend910_9362 with PyTorch/torch_npu 2.10,
-CANN 9.0, and SGLang 0.5.19. Use an existing compatible Ascend environment;
-the CUDA installation above does not prepare that environment.
+The Ascend profile uses BF16 MOSS-TTS-v1.5 on one 64 GB Ascend910_9362 with
+PyTorch 2.10, torch_npu 2.10, CANN 9.0, and the released SGLang 0.5.21 package.
+Preserve the Ascend PyTorch environment when installing SGLang dependencies.
+MOSS supplies its NPU seeded sampler and staged Q/K norm/RoPE locally; its
+backbone decode graph and sampling/state-machine graphs execute on the NPU.
 
-Apply the [MOSS runtime backport](../../patches/sglang/ascend-moss-runtime-0.5.19.patch)
-to a clean SGLang checkout at `0bcd822377da7b5718e674eaf9c870d349424dd1`.
-It preserves the seeded sampling formula on NPU, uses the configured
-PagedAttention operation during decode graphs, and updates its temporary
-workspace for the actual sequence lengths. Decode graphs remain enabled.
-The six resulting files match the corresponding files in the audited
-[runtime commit](https://github.com/celestial-micha/sglang/commit/c47189533a254c6639bcba50d2b71a272cda6914).
-
-Run these commands from this PR's checkout in the compatible environment:
+For concurrent reference encoding and graph input updates, set the following
+before starting the server:
 
 ```bash
-OMNI_NPU_ROOT="$(pwd)"
-git clone --branch release/v0.5.19 --single-branch \
-  https://github.com/sgl-project/sglang.git sglang-npu-runtime
-git -C sglang-npu-runtime checkout --detach 0bcd822377da7b5718e674eaf9c870d349424dd1
-git -C sglang-npu-runtime apply --check \
-  "$OMNI_NPU_ROOT/patches/sglang/ascend-moss-runtime-0.5.19.patch"
-git -C sglang-npu-runtime apply \
-  "$OMNI_NPU_ROOT/patches/sglang/ascend-moss-runtime-0.5.19.patch"
-export PYTHONPATH="$OMNI_NPU_ROOT:$OMNI_NPU_ROOT/sglang-npu-runtime/python:${PYTHONPATH:-}"
-python -c 'import sglang, sglang_omni; print(sglang.__file__); print(sglang_omni.__file__)'
-python -m pytest -q -rs tests/unit_test/moss_tts \
-  sglang-npu-runtime/test/registered/ops/test_npu_graph_update.py \
-  sglang-npu-runtime/test/registered/ops/test_seeded_murmur_hash.py
-python -m sglang_omni.cli serve \
-  --model-path OpenMOSS-Team/MOSS-TTS-v1.5 \
-  --config examples/configs/moss_tts.yaml --port 8000
+export ASCEND_RT_VISIBLE_DEVICES=0
+export SGLANG_OMNI_PLATFORM_SPEC=sglang_omni.platforms.npu.NPUOmniPlatform
+export PER_STREAM_QUEUE=1
+export TASK_QUEUE_ENABLE=1
 ```
 
-The import paths must point into those two checkouts. Keep the existing CANN
-entries in `PYTHONPATH` and use the same shell for tests and serving. The
-backport must be applied once to the clean revision above; it cannot be
-stacked with the Whisper runtime backport, which changes some of the same
-files. These instructions reproduce this model's tested dependency and do
-not imply an upstream SGLang release. The general Omni NPU installer currently
-accepts 0.5.18 and is not used for this 0.5.19 setup.
+`PER_STREAM_QUEUE=1` uses a separate host submission queue for each NPU stream.
+An update stream then drains its own queue rather than another stream's
+queued work. This is an existing torch_npu configuration,
+and no runtime source patch is required. The vendor documents it as an
+experimental option for multi-stream Dequeue blocking; measure its overhead
+on your deployment. See [stream-level TaskQueue delivery](https://www.hiascend.com/document/detail/en/Pytorch/2610/devguide/fwfeatures/docs/en/framework_feature_guide_pytorch/stream_taskqueue_parallel_delivery.md).
+
+Download `OpenMOSS-Team/MOSS-Audio-Tokenizer` as well as the TTS checkpoint.
+For local weights, create `npu-moss.yaml`:
+
+```yaml
+config_cls: MossTTSPipelineConfig
+model_path: /models/MOSS-TTS-v1.5
+stages:
+  preprocessing:
+    factory:
+      codec_model_path: /models/MOSS-Audio-Tokenizer
+  vocoder:
+    factory:
+      codec_model_path: /models/MOSS-Audio-Tokenizer
+```
+
+Start with `sgl-omni serve --model-path /models/MOSS-TTS-v1.5 --config npu-moss.yaml
+--port 8000`. Reference encoding and waveform decoding use the repository's
+NPU codec path; the CUDA-specific packed decoder remains a GPU capability.
 
 ## Server Configuration
 
@@ -287,13 +288,16 @@ over the single-value aliases.
 
 MOSS-TTS samples each row, position, and codebook with `multinomial_with_seed`, deriving a
 per-request seed from the public `seed` and combining it with a per-(step, channel) position. A
-sampled token therefore depends only on its own seed and position — never on its batch
-neighbours — so a fixed `seed` is reproducible at any concurrency, not just batch size 1.
+sampling noise therefore depends on its own seed, position, and token identity,
+independently of batch neighbours. With identical logits and prepared inputs,
+the sampler reproduces its selection across batches.
 Limitations:
 
 - Reproducibility holds for a **fixed server configuration and hardware**. Floating-point
-  non-determinism in the backbone (different batch shapes, GPU models, or kernels) can still
-  change the logits, and thus the sampled tokens, across deployments.
+  differences in reference encoding and the backbone (different batch shapes,
+  device models, or kernels) can change prepared codes or logits, and thus the
+  sampled tokens. A fixed seed does not guarantee identical end-to-end audio
+  across concurrency settings or deployments.
 - `seed` must be a non-negative integer; non-integer or negative values are rejected.
 - Requests **without** a `seed` draw a fresh random per-request seed, so they are not
   reproducible across runs (but are still independent of batch neighbours).
@@ -324,6 +328,15 @@ references, not CI thresholds.
 |---|---|---|---|---|---|
 | EN | 1.68% | 1.32% (4 outliers) | 3.449 / 4.141 | 0.811 | 2.312 |
 | ZH | 1.36% | 1.27% (2 outliers) | 3.608 / 4.153 | 0.635 | 2.213 |
+
+The tested Ascend profile above completed EN 1088/1088 with seed 1234, concurrency
+8, eight warmup requests, reference audio/text, and automatic duration tokens.
+The same HF Whisper-large-v3 FP32 scoring protocol gives 212/11943 = 1.7751%
+corpus WER, with four samples above 50% retained in that total. Auxiliary WER is
+184/11913 = 1.5445%; mean/p95 latency is 5.583/7.045 s, RTF mean is 1.2827, and
+throughput is 1.431 requests/s. Generation and scoring each have zero failures.
+Hardware, software, and recorded seed conditions differ from the historical
+H200 reference, so these measurements do not establish matched equivalence.
 
 A handful of utterances run away into a repetition loop (> 50% WER) and dominate the raw
 micro-average; excluding them, corpus WER is ~1.3% in both languages, and per-sample median WER

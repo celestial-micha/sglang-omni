@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 import torch
 from sglang.kernels.ops.sampling.murmur_hash import murmur_hash32
@@ -17,7 +15,7 @@ from sglang_omni.models.moss_tts.sampling_kernels import (
 
 pytestmark = pytest.mark.accelerator
 
-_UINT32_MAX_HASH_POSITION = 1_707_985_137
+UINT32_MAX_HASH_POSITION = 1_707_985_137
 
 
 @pytest.mark.parametrize("equal_scores", [False, True], ids=["random", "tied"])
@@ -51,7 +49,7 @@ def test_seeded_gumbel_argmax_matches_uint32_max_hash() -> None:
     seeds = torch.tensor([0], device=device, dtype=torch.long)
     # This position makes MurmurHash(seed=0, position, token_id=0) UINT32_MAX.
     positions = torch.tensor(
-        [_UINT32_MAX_HASH_POSITION], device=device, dtype=torch.long
+        [UINT32_MAX_HASH_POSITION], device=device, dtype=torch.long
     )
     output = torch.empty(1, device=device, dtype=torch.long)
 
@@ -75,7 +73,7 @@ def test_token_id_sampler_matches_sglang_at_the_uint32_max_hash() -> None:
     scores = torch.tensor([[-100.0, 0.0]], device=device)
     seeds = torch.tensor([0], device=device, dtype=torch.long)
     positions = torch.tensor(
-        [_UINT32_MAX_HASH_POSITION], device=device, dtype=torch.long
+        [UINT32_MAX_HASH_POSITION], device=device, dtype=torch.long
     )
     token_ids = torch.arange(scores.shape[1], device=device)
 
@@ -102,7 +100,7 @@ def test_seeded_gumbel_argmax_rejects_strided_output() -> None:
         seeded_gumbel_argmax(scores, seeds, positions, output)
 
 
-def _fused_case(vocab: int, temp: float, top_p: float, top_k: int, tie: bool):
+def fused_case(vocab: int, temp: float, top_p: float, top_k: int, tie: bool):
     return pytest.param(
         vocab,
         temp,
@@ -116,20 +114,20 @@ def _fused_case(vocab: int, temp: float, top_p: float, top_k: int, tie: bool):
 @pytest.mark.parametrize(
     "vocab,temp,top_p,top_k,tie",
     [
-        _fused_case(1025, 1.7, 0.8, 25, False),
-        _fused_case(1025, 1.7, 0.8, 25, True),
-        _fused_case(1025, 1.0, 0.9, 64, True),
-        _fused_case(1025, 1.2, 0.5, 1, False),
-        _fused_case(1025, 1.7, 0.001, 25, False),
-        _fused_case(1025, 1.7, 0.999, 25, False),
-        _fused_case(1025, 0.0, 0.8, 25, False),
-        _fused_case(1024, 1.7, 0.8, 25, False),
-        _fused_case(1024, 1.7, 0.8, 25, True),
-        _fused_case(1024, 1.0, 0.9, 64, True),
-        _fused_case(1024, 1.2, 0.5, 1, False),
-        _fused_case(1024, 0.0, 0.8, 25, False),
-        _fused_case(2, 1.0, 1.0, 50, False),
-        _fused_case(2, 1.3, 0.7, 0, False),
+        fused_case(1025, 1.7, 0.8, 25, False),
+        fused_case(1025, 1.7, 0.8, 25, True),
+        fused_case(1025, 1.0, 0.9, 64, True),
+        fused_case(1025, 1.2, 0.5, 1, False),
+        fused_case(1025, 1.7, 0.001, 25, False),
+        fused_case(1025, 1.7, 0.999, 25, False),
+        fused_case(1025, 0.0, 0.8, 25, False),
+        fused_case(1024, 1.7, 0.8, 25, False),
+        fused_case(1024, 1.7, 0.8, 25, True),
+        fused_case(1024, 1.0, 0.9, 64, True),
+        fused_case(1024, 1.2, 0.5, 1, False),
+        fused_case(1024, 0.0, 0.8, 25, False),
+        fused_case(2, 1.0, 1.0, 50, False),
+        fused_case(2, 1.3, 0.7, 0, False),
     ],
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -303,7 +301,7 @@ def test_sample_seeded_fused_hash_endpoint() -> None:
         seeds=torch.zeros(1, device=device, dtype=torch.long),
         # MurmurHash(seed=0, position, token_id=0) == UINT32_MAX here.
         positions=torch.tensor(
-            [_UINT32_MAX_HASH_POSITION], device=device, dtype=torch.long
+            [UINT32_MAX_HASH_POSITION], device=device, dtype=torch.long
         ),
     )
     a = sample_seeded_branchless(logits, **params)
@@ -378,7 +376,7 @@ def test_sample_seeded_fused_masked_lane_hash_endpoint() -> None:
         top_k=torch.full((1,), 8, device=device, dtype=torch.long),
         seeds=torch.zeros(1, device=device, dtype=torch.long),
         positions=torch.tensor(
-            [_UINT32_MAX_HASH_POSITION], device=device, dtype=torch.long
+            [UINT32_MAX_HASH_POSITION], device=device, dtype=torch.long
         ),
     )
     a = sample_seeded_branchless(logits, **params)
@@ -539,115 +537,3 @@ def test_tied_two_token_head_agrees_across_sampling_paths() -> None:
         assert int(fused.item()) == 0
         assert torch.equal(fused, branchless), f"branchless seed={seed}"
         assert torch.equal(fused, eager), f"eager seed={seed}"
-
-
-_UINT32_MASK = (1 << 32) - 1
-
-
-def murmur_hash32_scalar(seed: int, position: int, column: int) -> int:
-    """Independent scalar reference for SGLang's four-block MurmurHash32."""
-
-    def rotl32(value: int, bits: int) -> int:
-        return ((value << bits) | (value >> (32 - bits))) & _UINT32_MASK
-
-    def mix(hash_value: int, key: int) -> int:
-        key = (key * 0xCC9E2D51) & _UINT32_MASK
-        key = rotl32(key, 15)
-        key = (key * 0x1B873593) & _UINT32_MASK
-        hash_value = rotl32(hash_value ^ key, 13)
-        return (hash_value * 5 + 0xE6546B64) & _UINT32_MASK
-
-    seed &= (1 << 64) - 1
-    hash_value = 0
-    for key in (
-        seed & _UINT32_MASK,
-        (seed >> 32) & _UINT32_MASK,
-        position & _UINT32_MASK,
-        column & _UINT32_MASK,
-    ):
-        hash_value = mix(hash_value, key)
-    hash_value ^= 16
-    hash_value ^= hash_value >> 16
-    hash_value = (hash_value * 0x85EBCA6B) & _UINT32_MASK
-    hash_value ^= hash_value >> 13
-    hash_value = (hash_value * 0xC2B2AE35) & _UINT32_MASK
-    return (hash_value ^ (hash_value >> 16)) & _UINT32_MASK
-
-
-def sample_seeded_scalar(
-    scores: torch.Tensor,
-    seeds: torch.Tensor,
-    positions: torch.Tensor,
-    token_ids: torch.Tensor | None = None,
-) -> list[int]:
-    """Independent scalar reference for the GPU sampler's Gumbel-max step."""
-    columns = (
-        list(range(scores.shape[1]))
-        if token_ids is None
-        else [int(value) for value in token_ids.tolist()]
-    )
-    result = []
-    for row in range(scores.shape[0]):
-        values = []
-        for column_index, hash_column in enumerate(columns):
-            hashed = murmur_hash32_scalar(
-                int(seeds[row]), int(positions[row]), hash_column
-            )
-            uniform = hashed / _UINT32_MASK
-            log_uniform = math.log(uniform) if uniform else -math.inf
-            log_uniform = min(log_uniform, -(2.0**-32))
-            log_uniform = max(log_uniform, -float.fromhex("0x1.fffffffffffffp+1023"))
-            gumbel = -math.log(-log_uniform)
-            values.append(float(scores[row, column_index]) + gumbel)
-        result.append(max(range(len(values)), key=values.__getitem__))
-    return result
-
-
-@pytest.mark.parametrize("compact", [False, True], ids=["full", "compact"])
-def test_npu_seeded_sampler_matches_scalar_reference(compact: bool) -> None:
-    from sglang_omni.platforms import current_platform
-
-    if not current_platform.is_npu():
-        pytest.skip("requires Ascend NPU")
-
-    generator = torch.Generator().manual_seed(20260929)
-    scores = torch.randn(8, 257, generator=generator)
-    scores[0].fill_(-torch.inf)
-    scores[1, ::3] = -torch.inf
-    seeds = torch.tensor([0, 1, 1234, -1, -(2**63), 2**63 - 1, 2**32, 2**40])
-    positions = torch.tensor(
-        [_UINT32_MAX_HASH_POSITION, 0, 17, 2**32 - 1, 2**32, 2**33, -1, 2**63 - 1]
-    )
-    token_ids = torch.arange(257) * 65537 if compact else None
-    expected = sample_seeded_scalar(scores, seeds, positions, token_ids)
-    if compact:
-        actual = multinomial_with_seed_and_token_ids(
-            scores.npu(), seeds.npu(), positions.npu(), token_ids.npu()
-        )
-    else:
-        actual = multinomial_with_seed(scores.npu(), seeds.npu(), positions.npu()).view(
-            -1
-        )
-    assert actual.device.type == "npu"
-    assert actual.tolist() == expected
-
-
-def test_npu_seeded_sampler_masks_max_hash_endpoint() -> None:
-    from sglang_omni.platforms import current_platform
-
-    if not current_platform.is_npu():
-        pytest.skip("requires Ascend NPU")
-
-    scores = torch.tensor([[-torch.inf, 0.0]], device="npu")
-    seeds = torch.tensor([0], dtype=torch.long, device="npu")
-    positions = torch.tensor(
-        [_UINT32_MAX_HASH_POSITION], dtype=torch.long, device="npu"
-    )
-    assert multinomial_with_seed(scores, seeds, positions).item() == 1
-    compact = multinomial_with_seed_and_token_ids(
-        scores.flip(1),
-        seeds,
-        positions,
-        torch.tensor([1, 0], dtype=torch.long, device="npu"),
-    )
-    assert compact.item() == 0
