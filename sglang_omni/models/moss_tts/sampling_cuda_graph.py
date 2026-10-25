@@ -142,9 +142,8 @@ class MossTTSDelaySamplingCudaGraphRunner:
             try:
                 self.graphs[bucket] = self.capture_bucket(bucket)
                 logger.info(
-                    "Captured MOSS-TTS Delay sampling graph device=%s backbone_bucket=%s",
-                    self.model.device,
-                    bucket,
+                    f"Captured MOSS-TTS Delay sampling graph device={self.model.device} "
+                    f"backbone_bucket={bucket}"
                 )
             except Exception as exc:
                 self.graphs.pop(bucket, None)
@@ -188,6 +187,10 @@ class MossTTSDelaySamplingCudaGraphRunner:
         else:
             pass
 
+    def control_logit_columns(self) -> int:
+        """Text logit width: the two audio control tokens."""
+        return 2
+
     def make_static_inputs(self, max_bs: int) -> StaticSamplingInputs:
         device = self.model.device
         n_vq = int(self.model.config.n_vq)
@@ -195,7 +198,7 @@ class MossTTSDelaySamplingCudaGraphRunner:
         return StaticSamplingInputs(
             control_logits=torch.zeros(
                 max_bs,
-                2,
+                self.control_logit_columns(),
                 device=device,
                 dtype=torch.float32,
             ),
@@ -346,10 +349,11 @@ class MossTTSDelaySamplingCudaGraphRunner:
             int(inputs.audio_logits.shape[1]),
             int(inputs.audio_logits.shape[2]),
         )
-        if tuple(control_logits.shape) != (batch_size, 2):
+        expected_control_shape = (batch_size, int(inputs.control_logits.shape[1]))
+        if tuple(control_logits.shape) != expected_control_shape:
             raise RuntimeError(
                 "MOSS-TTS Delay sampling graph control-logits shape mismatch: "
-                f"got {tuple(control_logits.shape)}, expected {(batch_size, 2)}"
+                f"got {tuple(control_logits.shape)}, expected {expected_control_shape}"
             )
         else:
             pass
@@ -385,4 +389,27 @@ class MossTTSDelaySamplingCudaGraphRunner:
         return DelaySamplingOutput(
             rows=captured.rows[:batch_size],
             next_delay_state=captured.next_delay_state[:batch_size],
+        )
+
+
+class MossTTSDelayMixedSamplingCudaGraphRunner(MossTTSDelaySamplingCudaGraphRunner):
+    """Sampling graphs for batches that sample the full text vocabulary."""
+
+    def control_logit_columns(self) -> int:
+        return int(self.model.config.vocab_size_list[0])
+
+    def run_static(
+        self,
+        bucket: int,
+    ) -> DelaySamplingOutput:
+        inputs = self.require_inputs()
+        batch = DelayGraphBatch(
+            delay_state=inputs.delay_state[:bucket],
+            seeds=inputs.seeds[:bucket],
+            generation_steps=inputs.generation_steps[:bucket],
+        )
+        return self.model.sample_mixed_fixed_shape(
+            inputs.control_logits[:bucket],
+            inputs.audio_logits[:bucket],
+            batch,
         )

@@ -5,6 +5,13 @@ from __future__ import annotations
 
 import torch
 
+from sglang_omni.platforms import current_platform
+
+if current_platform.is_npu():
+    import torch_npu
+else:
+    pass
+
 UINT32_MASK = (1 << 32) - 1
 MOSS_HASH_SHIFT_CONSTANTS: dict[torch.device, tuple[torch.Tensor, ...]] = {}
 
@@ -60,8 +67,6 @@ def multinomial_with_seed_npu(
     token_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Return sampled column indices using the MOSS seeded Gumbel rule."""
-    import torch_npu
-
     assert scores.device.type == "npu"
     columns = (
         torch.arange(scores.shape[1], device=scores.device)

@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
 from sglang.srt.models.qwen3 import Qwen3Attention
 
+import sglang_omni.models.moss_tts.sglang_model as moss_model
 from sglang_omni.models.moss_tts.sampling_kernels import (
     multinomial_with_seed_and_token_ids,
 )
@@ -16,7 +18,10 @@ from sglang_omni.models.moss_tts.sampling_npu import (
     moss_hash32,
     multinomial_with_seed_npu,
 )
-from sglang_omni.models.moss_tts.sglang_model import MossNPUAttention
+from sglang_omni.models.moss_tts.sglang_model import (
+    MossNPUAttention,
+    MossTTSDelaySGLangModel,
+)
 from sglang_omni.platforms import current_platform
 
 UINT32_MAX_HASH_POSITION = 1_707_985_137
@@ -190,6 +195,33 @@ def test_npu_seeded_sampler_masks_max_hash_endpoint() -> None:
         torch.tensor([1, 0], dtype=torch.long, device="npu"),
     )
     assert compact.item() == 0
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(not current_platform.is_npu(), reason="Ascend NPU is required")
+def test_npu_loading_warms_model_sampler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Loading must warm the sampler used by NPU requests, not the shared draw."""
+    sampled_columns: list[list[int]] = []
+
+    def record_sampled_columns(
+        scores: torch.Tensor, seeds: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor:
+        sampled = multinomial_with_seed_npu(scores, seeds, positions)
+        sampled_columns.append(sampled.cpu().tolist())
+        return sampled
+
+    monkeypatch.setattr(moss_model, "multinomial_with_seed_npu", record_sampled_columns)
+    model = SimpleNamespace(
+        device=torch.device("npu"), config=SimpleNamespace(vocab_size_list=[257])
+    )
+    MossTTSDelaySGLangModel.precompile_kernels_after_loading(model)
+
+    expected = sample_seeded_scalar(
+        torch.zeros(2, 257),
+        torch.zeros(2, dtype=torch.long),
+        torch.zeros(2, dtype=torch.long),
+    )
+    assert sampled_columns == [expected[:1], expected]
 
 
 @pytest.mark.parametrize("rope_scaling", [None, {"rope_type": "linear", "factor": 2.0}])

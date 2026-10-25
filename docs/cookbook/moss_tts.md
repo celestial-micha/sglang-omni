@@ -28,19 +28,17 @@ The processor ships with the checkpoint, so no extra TTS package is needed. Deco
 
 ### Ascend NPU
 
-The tested single-card profile uses BF16 MOSS-TTS-v1.5 on a 64 GB Ascend910_9362, PyTorch/torch_npu 2.10, CANN 9.0 and released SGLang 0.5.21. Backbone decode and sampling graphs are enabled.
+The single-card NPU path uses BF16 MOSS-TTS-v1.5 with backbone decode and sampling/state-machine graphs. It uses the released SGLang dependency without a SGLang source patch.
 
-Start from an Ascend environment with the NPU runtime and Omni's audio dependencies installed; see [Ascend prerequisites](../get_started/installation_npu.md#prerequisites). The repository's NPU installer and images currently target SGLang 0.5.20, so that installer does not install this tested profile. In the prepared environment, install the released package and this checkout explicitly, preserving the existing Ascend dependencies:
+Use the A3 runtime pinned by `base-image-a3` in `[tool.sglang-omni.npu]` in `pyproject_npu.toml`, rather than a rolling image tag. The current runtime selects SGLang 0.5.22, CANN 9.1.0, Python 3.12, PyTorch 2.10.0 and torch_npu 2.10.0.post6. The host driver and firmware must support this CANN release; see [Ascend prerequisites](../get_started/installation_npu.md#prerequisites). Install this checkout inside that prepared runtime:
 
 ```bash
-python -m pip install 'setuptools>=77'
-python -m pip install --no-deps 'sglang==0.5.21'
-python -m pip install --no-deps --no-build-isolation -e .
+bash scripts/npu/install_npu.sh --install-system-deps
 ```
 
-These commands install the Python packages; they require an existing compatible CANN, PyTorch, torch_npu, triton-ascend and sgl-kernel-npu stack. No SGLang source patch is required.
+Run this command from the base image's root shell. The system-dependency option installs FFmpeg, libsndfile and SoX; omit it if these are already installed.
 
-Set the following before starting the server:
+Set the device and queue options before starting the server:
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0
@@ -49,10 +47,9 @@ export PER_STREAM_QUEUE=1
 export TASK_QUEUE_ENABLE=1
 ```
 
-Keep both queue settings for this profile. `PER_STREAM_QUEUE` is an [experimental torch_npu option](https://www.hiascend.com/document/detail/en/Pytorch/2610/devguide/fwfeatures/docs/en/framework_feature_guide_pytorch/stream_taskqueue_parallel_delivery.md) used by the validated concurrent reference-encoding and graph workload; check the profile on your deployment.
+`PER_STREAM_QUEUE` is an [experimental torch_npu option](https://www.hiascend.com/document/detail/en/Pytorch/2610/devguide/fwfeatures/docs/en/framework_feature_guide_pytorch/stream_taskqueue_parallel_delivery.md). Device 0 is an example; select the device allocated to your deployment.
 
-Download `OpenMOSS-Team/MOSS-Audio-Tokenizer` as well as the TTS checkpoint.
-For local weights, create `npu-moss.yaml`:
+Download `OpenMOSS-Team/MOSS-Audio-Tokenizer` as well as the TTS checkpoint. For local weights, create `npu-moss.yaml`:
 
 ```yaml
 config_cls: MossTTSPipelineConfig
@@ -176,7 +173,7 @@ curl -X POST http://localhost:8000/v1/audio/speech \
 `ref_audio` and `ref_text` are accepted as shorthand for `references[0].audio_path` and
 `references[0].text`.
 
-#### Python
+**Python**
 
 ```python
 import requests
@@ -287,18 +284,10 @@ over the single-value aliases.
 
 ## Seed Reproducibility
 
-MOSS-TTS samples each row, position, and codebook with `multinomial_with_seed`, deriving a
-per-request seed from the public `seed` and combining it with a per-(step, channel) position. A
-sampling noise therefore depends on its own seed, position, and token identity,
-independently of batch neighbours. With identical logits and prepared inputs,
-the sampler reproduces its selection across batches.
+MOSS-TTS derives a per-request seed from the public `seed` and combines it with a per-(step, channel) position and original token ID to generate sampling noise. With identical logits and prepared inputs, the sampler reproduces its selection across batches independently of batch neighbours.
 Limitations:
 
-- Reproducibility holds for a **fixed server configuration and hardware**. Floating-point
-  differences in reference encoding and the backbone (different batch shapes,
-  device models, or kernels) can change prepared codes or logits, and thus the
-  sampled tokens. A fixed seed does not guarantee identical end-to-end audio
-  across concurrency settings or deployments.
+- Reproducibility holds for a **fixed server configuration and hardware**. Floating-point differences in reference encoding and the backbone (different batch shapes, device models, or kernels) can change prepared codes or logits, and thus the sampled tokens. A fixed seed does not guarantee identical end-to-end audio across concurrency settings or deployments.
 - `seed` must be a non-negative integer; non-integer or negative values are rejected.
 - Requests **without** a `seed` draw a fresh random per-request seed, so they are not
   reproducible across runs (but are still independent of batch neighbours).
@@ -334,13 +323,13 @@ A handful of utterances in the H200 reference run away into a repetition loop (>
 micro-average; excluding them, corpus WER is ~1.3% in both languages, and per-sample median WER
 is 0.00%.
 
-The Ascend profile above completed all 1088 EN samples with seed 1234, concurrency 8, eight warmup requests, reference audio/text and automatic duration tokens. HF Whisper-large-v3 FP32 scored every output; generation and scoring each had zero failures.
+The Ascend profile above completed all 1088 EN samples with BF16 MOSS-TTS-v1.5 on one Ascend910_9362, SGLang 0.5.22, CANN 9.1.0 and torch_npu 2.10.0.post6. The run used concurrency 8, seed 1234, eight warmup requests, reference audio/text and automatic duration tokens. HF Whisper-large-v3 FP32 scored every output, with zero generation or scoring failures.
 
-| Device | Lang | WER (corpus) | WER (excl. >50%) | Latency mean / p95 (s) | RTF mean | Throughput (qps) |
-|---|---|---|---|---|---|---|
-| Ascend910_9362 | EN | 212/11943 = 1.7751% | 184/11913 = 1.5445% (4 outliers) | 5.583 / 7.045 | 1.2827 | 1.431 |
+| Device | WER (all samples) | Auxiliary WER (excl. >50%) | Latency mean / p95 (s) | Throughput (qps) |
+| --- | --- | --- | --- | --- |
+| Ascend910_9362 | 204/11943 = 1.7081% | 185/11920 = 1.5520% (3 severe samples) | 7.479 / 9.773 | 1.068 |
 
-All four severe samples remain in the primary WER; their cause is unresolved. Hardware, software and recorded seed conditions differ from the historical H200 reference, so this is not a matched hardware comparison.
+All three severe samples remain in the primary WER; their cause is unresolved. Hardware, software revision and recorded seed conditions differ from the historical H200 reference, so these results are not a matched hardware comparison. Backbone decode and sampling/state-machine graphs remain enabled on the NPU.
 
 ## Known Limitations
 

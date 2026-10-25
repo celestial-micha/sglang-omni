@@ -20,6 +20,8 @@ from sglang_omni.models.fun_cosyvoice3.prefix_cache import (
     BLOCK_FRAMES,
     PrefixCacheRow,
     PrefixKVPool,
+    PrefixRowAttention,
+    PrefixStepLayout,
     compile_forward_prefix,
     grow_rows,
     release_rows,
@@ -118,6 +120,7 @@ def test_prefix_hops_are_bit_identical_to_whole_history_hops(
     caches = [(PrefixCacheRow(), PrefixCacheRow()) for _ in range(rows)]
     previous = 0
     with torch.inference_mode(), torch.autocast("cuda", dtype=dtype):
+        estimator.build_modulations(time_span, dtype)
         for total in totals:
             packed = pack_rows([total] * rows, device)
             twin_rows = pack_rows([total] * 2 * rows, device)
@@ -170,6 +173,69 @@ def test_prefix_hops_are_bit_identical_to_whole_history_hops(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_prefix_and_whole_history_hops_launch_without_a_host_wait() -> None:
+    estimator = make_estimator()
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    pool = PrefixKVPool(
+        layer_num=LAYERS,
+        euler_steps=10,
+        head_num=HEADS,
+        head_dim=HEAD_DIM,
+        capacity_frames=16 * BLOCK_FRAMES,
+        device=device,
+        dtype=dtype,
+    )
+    torch.manual_seed(1)
+    lengths = [120, 70]
+    noise, mu, cond = (
+        torch.randn(1, sum(lengths), CHANNELS, device=device, dtype=dtype)
+        for _ in range(3)
+    )
+    spks = torch.randn(len(lengths), CHANNELS, device=device, dtype=dtype)
+    unit = torch.linspace(0, 1, 11, device=device, dtype=dtype)
+    time_span = 1 - torch.cos(unit * 0.5 * torch.pi)
+    caches = [(PrefixCacheRow(), PrefixCacheRow()) for _ in lengths]
+    for pair, length in zip(caches, lengths, strict=True):
+        assert grow_rows(pool, list(pair), [length, length])
+    with torch.inference_mode(), torch.autocast("cuda", dtype=dtype):
+        estimator.build_modulations(time_span, dtype)
+        angles = estimator.rope_angles(max(lengths))
+        torch.cuda.synchronize()
+        sync_debug_mode = torch.cuda.get_sync_debug_mode()
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            twin_rows = pack_rows(lengths * 2, device)
+            whole = solve_flow_euler_packed(
+                estimator,
+                noise,
+                time_span,
+                mu,
+                spks,
+                cond,
+                twin_rows,
+                estimator.row_attention(twin_rows, streaming=True, dtype=dtype),
+                angles,
+                cfg_rate=0.7,
+            )
+            cached = solve_flow_euler_prefix(
+                estimator,
+                pool,
+                noise,
+                time_span,
+                mu,
+                spks,
+                cond,
+                lengths,
+                caches,
+                cfg_rate=0.7,
+            )
+        finally:
+            torch.cuda.set_sync_debug_mode(sync_debug_mode)
+    assert torch.equal(cached, whole)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_compiled_prefix_hops_follow_each_row_across_batches() -> None:
     """Compiled hops over rows with their own prompts, prefixes and lengths,
     one joining fresh beside a cached one and the order flipped on a later hop,
@@ -215,6 +281,9 @@ def test_compiled_prefix_hops_follow_each_row_across_batches() -> None:
         )
 
     with torch.inference_mode(), torch.autocast("cuda", dtype=dtype):
+        estimator.build_modulations(time_span, dtype)
+        with torch.autocast("cuda", enabled=False):
+            reference_estimator.build_modulations(time_span.float(), torch.float32)
         for hop in hops:
             names = [name for name, _ in hop]
             totals = [total for _, total in hop]
@@ -287,6 +356,57 @@ def test_compiled_prefix_hops_follow_each_row_across_batches() -> None:
     assert len(pool.free_blocks) == 32
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_prefix_layouts_upload_from_pinned_memory_without_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = torch.device("cuda")
+    pool = PrefixKVPool(
+        layer_num=1,
+        euler_steps=1,
+        head_num=HEADS,
+        head_dim=HEAD_DIM,
+        capacity_frames=128 * BLOCK_FRAMES,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    rows = [PrefixCacheRow(), PrefixCacheRow()]
+    assert grow_rows(pool, rows, [2048, 2048])
+    layout = PrefixStepLayout(
+        half_frames=4096,
+        row_slots=1,
+        segment_count=2 * (-(-4096 // CHUNK) + 2),
+        page_table_width=4096,
+    )
+
+    uploads: list[tuple[bool, bool]] = []
+    to = torch.Tensor.to
+
+    def recording_to(
+        tensor: torch.Tensor,
+        target: torch.device | torch.dtype,
+        non_blocking: bool = False,
+    ) -> torch.Tensor:
+        moved = to(tensor, target, non_blocking=non_blocking)
+        if tensor.device.type == "cpu" and moved.device.type == "cuda":
+            uploads.append((tensor.is_pinned(), non_blocking))
+        else:
+            pass
+        return moved
+
+    monkeypatch.setattr(torch.Tensor, "to", recording_to)
+    PrefixRowAttention(
+        rows=rows,
+        new_frames=[2048, 2048],
+        layout=layout,
+        padding_block=pool.padding_block,
+        chunk_size=CHUNK,
+        device=device,
+    )
+    assert uploads
+    assert all(pinned and non_blocking for pinned, non_blocking in uploads)
+
+
 def test_grow_rows_takes_nothing_on_a_shortfall() -> None:
     pool = PrefixKVPool.__new__(PrefixKVPool)
     pool.free_blocks = [0, 1, 2]
@@ -323,6 +443,10 @@ def test_prefix_graph_replays_equal_the_eager_solve(compile_prefix: bool) -> Non
         for _ in range(2)
     ]
     graph_pool, eager_pool = pools
+    unit = torch.linspace(0, 1, 11, device=device, dtype=dtype)
+    time_span = (1 - torch.cos(unit * 0.5 * torch.pi)).float()
+    with torch.inference_mode(), torch.autocast("cuda", dtype=dtype):
+        estimator.build_modulations(time_span, dtype)
     if compile_prefix:
         assert estimator.compile(dtype)
         for pool in pools:
@@ -363,7 +487,7 @@ def test_prefix_graph_replays_equal_the_eager_solve(compile_prefix: bool) -> Non
     torch.manual_seed(3)
     whole_history_inputs = dict(
         noise=torch.randn(1, 500, CHANNELS, device=device),
-        time_span=torch.linspace(0, 1, 11, device=device),
+        time_span=time_span,
         mu=torch.randn(1, 500, CHANNELS, device=device),
         speaker_embeddings=torch.randn(2, CHANNELS, device=device, dtype=dtype),
         mel_conditioning=torch.randn(1, 500, CHANNELS, device=device),
@@ -384,8 +508,6 @@ def test_prefix_graph_replays_equal_the_eager_solve(compile_prefix: bool) -> Non
     caches = {
         name: [(PrefixCacheRow(), PrefixCacheRow()) for _ in pools] for name in streams
     }
-    unit = torch.linspace(0, 1, 11, device=device, dtype=dtype)
-    time_span = 1 - torch.cos(unit * 0.5 * torch.pi)
     steps = [
         [("a", 150)],
         [("b", 100), ("a", 250)],
@@ -421,7 +543,7 @@ def test_prefix_graph_replays_equal_the_eager_solve(compile_prefix: bool) -> Non
                     assert grow_rows(pool, list(pair), [total, total])
                 inputs = dict(
                     noise=take("noise"),
-                    time_span=time_span.float(),
+                    time_span=time_span,
                     mu=take("mu"),
                     speaker_embeddings=torch.stack(
                         [streams[name]["speaker_embeddings"] for name in names]
@@ -492,6 +614,8 @@ def test_whole_history_graph_replays_equal_the_eager_solve(
     dtype = torch.bfloat16
     unit = torch.linspace(0, 1, 11, device=device, dtype=dtype)
     time_span = (1 - torch.cos(unit * 0.5 * torch.pi)).float()
+    with torch.inference_mode(), torch.autocast("cuda", dtype=dtype):
+        estimator.build_modulations(time_span, dtype)
 
     def step_inputs(lengths: tuple[int, ...]) -> dict[str, torch.Tensor]:
         generator = torch.Generator(device=device).manual_seed(sum(lengths))
