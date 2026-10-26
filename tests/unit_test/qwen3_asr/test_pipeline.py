@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -18,10 +20,17 @@ import sglang_omni.scheduling.omni_scheduler as omni_scheduler
 import sglang_omni.scheduling.sglang_backend as sglang_backend
 import sglang_omni.utils.cuda_graph_batch_validator as cuda_graph_batch_validator
 import sglang_omni.utils.device as device_utils
+from sglang_omni.config.manager import ConfigManager
+from sglang_omni.config.runtime import resolve_stage_factory_args
 from sglang_omni.models.qwen3_asr import request_builders
 from sglang_omni.models.qwen3_asr.config import Qwen3ASRPipelineConfig
 from sglang_omni.models.qwen3_asr.stages import create_sglang_qwen3_asr_executor
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
+from sglang_omni.pipeline.stage_workers import (
+    StageLaunchConfig,
+    StageWorkerProcessSpec,
+    patched_spawn_env,
+)
 from sglang_omni.scheduling.generation_batch_policy import (
     build_default_cuda_graph_bs,
     build_generation_batch_overrides,
@@ -342,6 +351,7 @@ def patch_engine_dependencies(
         infra_kwargs=[],
         attest_calls=[],
         graph_init_calls=[],
+        encoder_graph_init_calls=[],
         encoder_service=SimpleNamespace(close=lambda: None),
         encoder_service_kwargs={},
         tokenizer=object(),
@@ -431,7 +441,11 @@ def patch_engine_dependencies(
         model_worker = SimpleNamespace(
             gpu_id=gpu_id,
             model_runner=SimpleNamespace(
-                model=SimpleNamespace(init_encoder_graphs=lambda **kwargs: None),
+                model=SimpleNamespace(
+                    init_encoder_graphs=lambda **kwargs: recorded.encoder_graph_init_calls.append(
+                        kwargs
+                    )
+                ),
                 prefill_attention_backend_str="fa3",
                 decode_attention_backend_str="fa3",
             ),
@@ -462,6 +476,75 @@ def patch_engine_dependencies(
         ),
     )
     return recorded
+
+
+def test_npu_profile_reaches_runtime_without_leaking_benchmark_cache_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker startup consumes the profile without leaking the benchmark override."""
+    config_path = (
+        Path(__file__).resolve().parents[3] / "examples/configs/qwen3_asr_0_6b_npu.yaml"
+    )
+    config_manager = ConfigManager.from_file(str(config_path))
+    serving_config = config_manager.config
+    benchmark_config = config_manager.merge_config(
+        [("asr.factory.pre_lm_cache_size_bytes", "1")]
+    )
+    recorded = patch_engine_dependencies(monkeypatch, want_cuda_graph=False)
+    for environment_variable in (
+        "PER_STREAM_QUEUE",
+        "TASK_QUEUE_ENABLE",
+        "ASCEND_LAUNCH_BLOCKING",
+    ):
+        monkeypatch.delenv(environment_variable, raising=False)
+
+    for pipeline_config, expected_cache_bytes in (
+        (benchmark_config, 1),
+        (serving_config, 2 * 1024**3),
+    ):
+        worker_process = StageWorkerProcessSpec(
+            process_name="asr",
+            stage_specs=[
+                StageLaunchConfig(
+                    stage_name="asr",
+                    env_defaults=pipeline_config.resolved_stage_env_defaults("asr"),
+                )
+            ],
+        )
+        with patched_spawn_env(worker_process):
+            assert os.environ["PER_STREAM_QUEUE"] == "1"
+            assert os.environ["TASK_QUEUE_ENABLE"] == "1"
+            assert os.environ["ASCEND_LAUNCH_BLOCKING"] == "0"
+            encoder_initializations_before = len(recorded.encoder_graph_init_calls)
+            scheduler = create_sglang_qwen3_asr_executor(
+                **resolve_stage_factory_args(pipeline_config.stages[0], pipeline_config)
+            )
+
+        assert (
+            recorded.encoder_service_kwargs["cache_max_bytes"] == expected_cache_bytes
+        )
+        assert recorded.encoder_service_kwargs["max_batch_size"] == 8
+        assert scheduler.enable_async_decode is True
+        assert scheduler.async_decode_min_batch_size == 1
+        assert recorded.build_kwargs["disable_cuda_graph"] is True
+        assert recorded.build_kwargs["cuda_graph_backend_prefill"] == "disabled"
+        assert recorded.build_kwargs["enable_torch_compile"] is False
+        assert recorded.build_kwargs["disable_radix_cache"] is True
+        assert recorded.build_kwargs["max_running_requests"] == 64
+        assert (
+            len(recorded.encoder_graph_init_calls) == encoder_initializations_before + 1
+        )
+        assert recorded.encoder_graph_init_calls[-1]["max_batch_size"] == 8
+        assert recorded.graph_init_calls == []
+
+    assert all(
+        environment_variable not in os.environ
+        for environment_variable in (
+            "PER_STREAM_QUEUE",
+            "TASK_QUEUE_ENABLE",
+            "ASCEND_LAUNCH_BLOCKING",
+        )
+    )
 
 
 def test_qwen3_asr_threads_explicit_cuda_graph_bs(monkeypatch, caplog) -> None:

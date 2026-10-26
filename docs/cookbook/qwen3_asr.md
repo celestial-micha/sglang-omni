@@ -155,6 +155,42 @@ sgl-omni serve \
   --port 8000
 ```
 
+### Ascend NPU
+
+Use the [Ascend NPU installation guide](../get_started/installation_npu.md) for host drivers and container device access. This is an opt-in correctness and reproducibility recipe, with no new latency improvement claimed. The reference configuration was evaluated on one Ascend910_9362 with 64 GiB memory, driver 25.5.1, CANN 9.0 on A3, Python 3.11.15, PyTorch 2.10.0+cpu, TorchNPU 2.10.0, and SGLang 0.5.22. These observations do not establish compatibility with another CANN release.
+
+Build the tested dependency stack with this Dockerfile; it overlays the pinned official Omni NPU image while preserving its NPU dependencies:
+
+```dockerfile
+FROM swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni@sha256:6c51a8118b33ab018c805bf4b64ee9f77c434aed0cee37295f14acce0512c580
+RUN python3 -m pip install --no-cache-dir --no-deps \
+    jiwer==4.0.0 RapidFuzz==3.14.1 more-itertools==10.8.0 \
+    openai-whisper==20250625 zhon==2.1.1
+RUN python3 -m pip install --no-cache-dir --no-deps \
+    'https://files.pythonhosted.org/packages/0c/2b/1b4be3867a9cffec7279a07f2ddb9a52fb17e7188921e0307c7527eaeee5/sglang-0.5.22-cp311-cp311-manylinux_2_34_aarch64.whl#sha256=1a2e055df8f4b9613e00ae0998e24f2fc450fdf56088211ebb2425974976a7e4'
+```
+
+Mount this checkout in the container and run the Qwen3-ASR-0.6B profile from the checkout root, with a writable CANN work directory:
+
+```bash
+mkdir -p /tmp/qwen3-asr-cann-work
+PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
+ASCEND_WORK_PATH=/tmp/qwen3-asr-cann-work ASCEND_USE_FIA=False \
+PER_STREAM_QUEUE=1 TASK_QUEUE_ENABLE=1 ASCEND_LAUNCH_BLOCKING=0 \
+sgl-omni serve \
+  --config examples/configs/qwen3_asr_0_6b_npu.yaml \
+  --port 8000
+```
+
+For a local checkpoint, add `--model-path /models/Qwen3-ASR-0.6B`. Use `Qwen/Qwen3-ASR-0.6B` as the model identifier in the transcription examples below, or pass the matching `--model-name` when starting the server.
+
+This profile retains encoder graphs, the default encoder batch limit of eight, zero-wait queue draining, and asynchronous LM decode with threshold one. It uses eager LM decode and prefill, disables Torch compilation and radix caching, and retains 64 running engine requests with up to four concurrent long uploads. Eager LM decode is the known-correct reference route on the tested stack; this configuration does not fix or explain the graph-enabled route's recognition regression.
+
+The profile defaults `TASK_QUEUE_ENABLE=1`, `PER_STREAM_QUEUE=1`, and `ASCEND_LAUNCH_BLOCKING=0`; an inherited environment value takes precedence. Set these values before process startup. The pre-LM embedding cache retains its default 2 GiB budget. A unique-input benchmark that repeats the same clips may use `--asr.factory.pre_lm_cache_size_bytes 1` to avoid cached embeddings; this is a 1-BYTE benchmark override, separate from the serving profile.
+
+Validate recognition quality and request behavior on the target stack before use. The native ASR benchmark below accepts a pinned dataset revision, scores the spoken `ref_text`, and reports English word error rate and Chinese character error rate. No latency result from a different configuration or dependency stack is inherited by this recipe.
+
 ## Transcribe Audio
 
 ```bash
