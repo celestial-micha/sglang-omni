@@ -185,6 +185,30 @@ sgl-omni serve \
 
 For a local checkpoint, add `--model-path /models/Qwen3-ASR-0.6B`. Use `Qwen/Qwen3-ASR-0.6B` as the model identifier in the transcription examples below, or pass the matching `--model-name` when starting the server.
 
+The same A-only settings are also available for Qwen3-ASR-1.7B:
+
+```bash
+mkdir -p /tmp/qwen3-asr-cann-work
+PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
+ASCEND_WORK_PATH=/tmp/qwen3-asr-cann-work ASCEND_USE_FIA=False \
+PER_STREAM_QUEUE=1 TASK_QUEUE_ENABLE=1 ASCEND_LAUNCH_BLOCKING=0 \
+sgl-omni serve \
+  --config examples/configs/qwen3_asr_1_7b_npu.yaml \
+  --port 8000
+```
+
+For a local 1.7B checkpoint, add `--model-path /models/Qwen3-ASR-1.7B` and use `Qwen/Qwen3-ASR-1.7B` in requests. The two profiles differ only in their names and model paths; the larger model uses the same execution settings.
+
+On the stack above, each model was evaluated on the complete original SeedTTS English and Chinese splits at revision `27f4c1adee83b5b29b7c4b375f6b976324bda308`, with concurrency four, one pass, no benchmark warmup, and the default 2 GiB serving cache. Scoring uses spoken `ref_text`, with English word edits and Chinese character edits:
+
+| Model | English WER, 1088 records | Chinese CER, 2020 records |
+| --- | ---: | ---: |
+| Qwen3-ASR-0.6B | 1.6041% (212/13216) | 1.0309% (344/33370) |
+| Qwen3-ASR-1.7B | 1.2031% (159/13216) | 0.5993% (200/33370) |
+
+All 3108 records per model returned successfully with nonempty text and zero skipped records. Each model also passed 13 separate endpoint checks: ten successful nonempty responses and three expected HTTP 400 rejections; eight official-sample responses met the existing CER <= 0.1 threshold. These are separate model evaluations of the reference recipe, not a controlled speedup or cross-hardware equivalence comparison.
+
 This profile retains encoder graphs, the default encoder batch limit of eight, zero-wait queue draining, and asynchronous LM decode with threshold one. It uses eager LM decode and prefill, disables Torch compilation and radix caching, and retains 64 running engine requests with up to four concurrent long uploads. Eager LM decode is the known-correct reference route on the tested stack; this configuration does not fix or explain the graph-enabled route's recognition regression.
 
 The profile defaults `TASK_QUEUE_ENABLE=1`, `PER_STREAM_QUEUE=1`, and `ASCEND_LAUNCH_BLOCKING=0`; an inherited environment value takes precedence. Set these values before process startup. The pre-LM embedding cache retains its default 2 GiB budget. A unique-input benchmark that repeats the same clips may use `--asr.factory.pre_lm_cache_size_bytes 1` to avoid cached embeddings; this is a 1-BYTE benchmark override, separate from the serving profile.

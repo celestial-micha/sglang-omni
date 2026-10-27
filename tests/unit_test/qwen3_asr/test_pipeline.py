@@ -53,7 +53,6 @@ def fake_server_args_builder(
     resolved_chunked_prefill_size: int = 8192,
 ):
     def build(model_path, context_length, **overrides):
-        del model_path
         build_kwargs.update(overrides)
         flat = {
             key: value
@@ -75,7 +74,9 @@ def fake_server_args_builder(
             flat.setdefault(name, default)
         if flat.get("chunked_prefill_size") is None:
             flat["chunked_prefill_size"] = resolved_chunked_prefill_size
-        server_args = SimpleNamespace(context_length=context_length, **flat)
+        server_args = SimpleNamespace(
+            model_path=model_path, context_length=context_length, **flat
+        )
         prefill_bs = overrides.get("cuda_graph_bs_prefill")
         prefill_max_bs = overrides.get("cuda_graph_max_bs_prefill")
         locked = set()
@@ -478,15 +479,23 @@ def patch_engine_dependencies(
     return recorded
 
 
+@pytest.mark.parametrize(
+    ("model_size", "model_path"),
+    [("0_6b", "Qwen/Qwen3-ASR-0.6B"), ("1_7b", "Qwen/Qwen3-ASR-1.7B")],
+)
 def test_npu_profile_reaches_runtime_without_leaking_benchmark_cache_override(
     monkeypatch: pytest.MonkeyPatch,
+    model_size: str,
+    model_path: str,
 ) -> None:
     """Worker startup consumes the profile without leaking the benchmark override."""
     config_path = (
-        Path(__file__).resolve().parents[3] / "examples/configs/qwen3_asr_0_6b_npu.yaml"
+        Path(__file__).resolve().parents[3]
+        / f"examples/configs/qwen3_asr_{model_size}_npu.yaml"
     )
     config_manager = ConfigManager.from_file(str(config_path))
     serving_config = config_manager.config
+    assert serving_config.model_path == model_path
     benchmark_config = config_manager.merge_config(
         [("asr.factory.pre_lm_cache_size_bytes", "1")]
     )
@@ -523,6 +532,7 @@ def test_npu_profile_reaches_runtime_without_leaking_benchmark_cache_override(
         assert (
             recorded.encoder_service_kwargs["cache_max_bytes"] == expected_cache_bytes
         )
+        assert recorded.server_args.model_path == model_path
         assert recorded.encoder_service_kwargs["max_batch_size"] == 8
         assert scheduler.enable_async_decode is True
         assert scheduler.async_decode_min_batch_size == 1
