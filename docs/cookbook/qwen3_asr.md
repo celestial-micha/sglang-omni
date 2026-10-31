@@ -161,16 +161,7 @@ sgl-omni serve \
 
 ### Ascend NPU
 
-Follow the [Ascend NPU installation guide](../get_started/installation_npu.md) for host setup and container device access. The 0.6B and 1.7B profiles were validated on one Ascend910_9362 (64 GiB), driver 25.5.1, CANN 9.0/A3, PyTorch/TorchNPU 2.10.0 and SGLang 0.5.22. Use this Dockerfile to reproduce the tested dependencies:
-
-```dockerfile
-FROM swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang-omni@sha256:6c51a8118b33ab018c805bf4b64ee9f77c434aed0cee37295f14acce0512c580
-RUN python3 -m pip install --no-cache-dir --no-deps \
-    jiwer==4.0.0 RapidFuzz==3.14.1 more-itertools==10.8.0 \
-    openai-whisper==20250625 zhon==2.1.1
-RUN python3 -m pip install --no-cache-dir --no-deps \
-    'https://files.pythonhosted.org/packages/0c/2b/1b4be3867a9cffec7279a07f2ddb9a52fb17e7188921e0307c7527eaeee5/sglang-0.5.22-cp311-cp311-manylinux_2_34_aarch64.whl#sha256=1a2e055df8f4b9613e00ae0998e24f2fc450fdf56088211ebb2425974976a7e4'
-```
+Follow the [Ascend NPU installation guide](../get_started/installation_npu.md) for setup. Both profiles were validated on Ascend910_9362 (64 GiB), CANN 9.0/A3, PyTorch/TorchNPU 2.10.0 and SGLang 0.5.22.
 
 Mount this checkout in the container and run from its root:
 
@@ -185,9 +176,9 @@ sgl-omni serve \
   --port 8000
 ```
 
-For 1.7B, replace the config filename with `qwen3_asr_1_7b_npu.yaml`. For local weights, add `--model-path /models/Qwen3-ASR-0.6B` (or the 1.7B directory). Set `--model-name` to the matching Hugging Face identifier when using a local path, and use that identifier in transcription requests.
+For 1.7B, use `qwen3_asr_1_7b_npu.yaml`. For local weights, add `--model-path /path/to/model` and `--model-name Qwen/Qwen3-ASR-0.6B` (or `Qwen/Qwen3-ASR-1.7B`); use the same model name in transcription requests.
 
-Both profiles retain encoder graphs and asynchronous decode, use eager LM decode/prefill, and disable Torch compilation and radix caching. Set the queue variables before startup as shown; inherited environment values override YAML defaults.
+Set the queue variables before startup as shown; inherited environment values override YAML defaults.
 
 ## Transcribe Audio
 
