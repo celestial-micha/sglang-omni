@@ -19,6 +19,10 @@ MODEL_PATH="$(
 )"
 ```
 
+### Ascend NPU graph execution
+
+See [Qwen3-ASR graph execution on Ascend NPU](../get_started/installation_npu.md#qwen3-asr-graph-execution) for queue settings and runtime restrictions.
+
 <a id="apple-silicon-torch-mps"></a>
 
 ### Apple Silicon
@@ -183,7 +187,7 @@ sgl-omni serve \
 
 For 1.7B, replace the config filename with `qwen3_asr_1_7b_npu.yaml`. For local weights, add `--model-path /models/Qwen3-ASR-0.6B` (or the 1.7B directory). Set `--model-name` to the matching Hugging Face identifier when using a local path, and use that identifier in transcription requests.
 
-Both profiles retain encoder graphs and asynchronous decode, use eager LM decode/prefill, and disable Torch compilation and radix caching. Set the queue variables before startup as shown; inherited environment values override YAML defaults. These are deployment examples for the tested stack, with no speedup claim.
+Both profiles retain encoder graphs and asynchronous decode, use eager LM decode/prefill, and disable Torch compilation and radix caching. Set the queue variables before startup as shown; inherited environment values override YAML defaults.
 
 ## Transcribe Audio
 
@@ -266,6 +270,7 @@ WebSocket session open for new audio.
   "type": "session.update",
   "session": {
     "language": "English",
+    "decode_interval_ms": 1000,
     "turn_detection": {
       "type": "server_vad",
       "threshold": 0.5,
@@ -275,6 +280,8 @@ WebSocket session open for new audio.
   }
 }
 ```
+
+`decode_interval_ms` is how much new audio arrives between partial decodes. It defaults to 2000 ms, must be at least 200 ms, and `null` restores the default. Like `language` and `turn_detection`, it can change only while no uncommitted audio is buffered; with server VAD that means before the first audio packet.
 
 Each periodic decode is an ordinary stateless Qwen3-ASR request over all audio
 in the active segment. After the first two refreshes, the server rolls five
@@ -293,7 +300,8 @@ Partial results are full replacements, not append-only deltas:
   "audio_start_ms": 0,
   "audio_end_ms": 2000,
   "text": "hello wor",
-  "is_final": false
+  "is_final": false,
+  "language": "English"
 }
 ```
 
@@ -305,6 +313,8 @@ segment, including segments opened by the 30 second boundary, which have no
 `input_audio_buffer.speech_started` event. An event with
 `is_final=true` is immutable. `transcription.completed` contains the joined
 text from all final segments.
+
+`language` is the language the segment was transcribed in, as Qwen3-ASR names it (for example `English`): the detected language, or the `language` hint when the session set one. `transcription.completed` carries the language of its last non-empty final segment. Both fields are `null` when the language is unknown.
 
 Append events are not idempotent. After a transport failure, reconnect and
 restart the transcription rather than retrying packets on the old session.
